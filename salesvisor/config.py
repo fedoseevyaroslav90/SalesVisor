@@ -29,6 +29,17 @@ class Settings:
     # Писать ли комментарии в задачи при переносе декады
     bitrix_post_comments: bool = field(default_factory=lambda: _env("BITRIX_POST_COMMENTS", "0") == "1")
 
+    # Папка, куда завод кладёт выгрузки (SFTP контура: /data/SAP/salesvisor). Работает, когда Metabase недоступен
+    import_dir: str = field(default_factory=lambda: _env("IMPORT_DIR"))
+
+    # Вход через портал «Инкаб ИИ»: портал проксирует запросы и ставит общий секрет и имя сотрудника.
+    # Если секрет задан, запросы без него отклоняются
+    portal_token: str = field(default_factory=lambda: _env("PORTAL_TOKEN"))
+
+    @property
+    def metabase_ready(self) -> bool:
+        return bool(self.metabase_url and (self.metabase_api_key or (self.metabase_user and self.metabase_password)))
+
 
 def get_settings() -> Settings:
     return Settings()

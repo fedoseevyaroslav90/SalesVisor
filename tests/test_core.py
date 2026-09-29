@@ -127,3 +127,30 @@ def test_bitrix_manual_link_and_live():
     from salesvisor.bitrix import live_info
     info = live_info(bx, "345579", None)
     assert info["task"]["status"] == "Выполняется" and info["task"]["responsible"] == "Громова Анна"
+
+
+def test_import_folder_and_portal_guard(tmp_path):
+    from salesvisor.sync import run_sync
+
+    engine = make_engine("sqlite:///:memory:")
+    inbox = tmp_path / "import"
+    inbox.mkdir()
+    pd.DataFrame([svet_row("1200000007", "10", "3Д09", "1Д10", "10", "yellow")]).to_csv(inbox / "svetofor.csv", index=False)
+    pd.DataFrame([seg_row("1200000007", "10", "1", "30 сентября, 2026")]).to_csv(inbox / "otrezki.csv", index=False)
+    (inbox / "readme.csv").write_text("a,b\n1,2\n")
+    settings = Settings(database_url="sqlite:///:memory:", import_dir=str(inbox), portal_token="s3cret")
+
+    res = run_sync(engine, settings)
+    assert [r["source"] for r in res] == ["segments", "svetofor"]  # отрезки раньше светофора
+    assert not any(f.is_file() for f in inbox.iterdir())
+    assert len(list((inbox / "done").iterdir())) == 2 and len(list((inbox / "failed").iterdir())) == 1
+
+    client = TestClient(create_app(engine, settings))
+    assert client.get("/api/health").status_code == 200
+    assert client.get("/api/orders").status_code == 401
+    assert client.get("/", headers={"X-SalesVisor-Token": "wrong"}).status_code == 401
+    h = {"X-SalesVisor-Token": "s3cret", "X-SalesVisor-User": "user-ivanova",
+         "X-SalesVisor-Person": "%D0%98%D0%B2%D0%B0%D0%BD%D0%BE%D0%B2%D0%B0%20%D0%90."}
+    assert client.get("/api/meta", headers=h).json()["portal_user"] == "Иванова А."
+    assert client.post("/api/orders/1200000007/comments", json={"text": "Проверка", "author": "кто-то"}, headers=h).status_code == 200
+    assert client.get("/api/orders/1200000007", headers=h).json()["comments"][0]["author"] == "Иванова А."

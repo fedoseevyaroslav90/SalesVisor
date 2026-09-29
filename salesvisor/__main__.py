@@ -1,7 +1,7 @@
 """Командная строка:
     python -m salesvisor serve [--port 8000]
     python -m salesvisor load ФАЙЛ [ФАЙЛ ...]       загрузить выгрузки вручную
-    python -m salesvisor sync [--every СЕКУНД]      забрать выгрузки из Metabase (разово или по кругу)
+    python -m salesvisor sync [--every СЕКУНД]      забрать выгрузки из Metabase или папки IMPORT_DIR (разово или по кругу)
 """
 from __future__ import annotations
 

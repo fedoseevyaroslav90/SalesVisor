@@ -12,23 +12,30 @@ services:
 
   web:
     build: .
+    image: salesvisor:local
     restart: unless-stopped
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://salesvisor:${POSTGRES_PASSWORD}@db/salesvisor
+      TZ: ${TZ:-Asia/Yekaterinburg}
     ports:
-      - "${WEB_PORT:-8000}:8000"
+      # В контуре «Инкаб ИИ»: WEB_BIND=172.16.50.30, чтобы приложение видел только портал
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8102}:8000"
     depends_on: [db]
 
-  # Забирает выгрузки из Metabase раз в час
+  # Забирает выгрузки из Metabase или из папки SFTP раз в час
   sync:
-    build: .
+    image: salesvisor:local
     restart: unless-stopped
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://salesvisor:${POSTGRES_PASSWORD}@db/salesvisor
+      TZ: ${TZ:-Asia/Yekaterinburg}
+      IMPORT_DIR: /import
+    volumes:
+      - ${IMPORT_HOST_DIR:-./import}:/import
     command: ["python", "-m", "salesvisor", "sync", "--every", "${SYNC_EVERY:-3600}"]
-    depends_on: [db]
+    depends_on: [db, web]
 
 volumes:
   pgdata:

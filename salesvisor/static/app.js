@@ -27,7 +27,7 @@
 
   // ---------- справочники ----------
   async function loadMeta() {
-    state.meta = await api('/api/meta');
+    state.meta = await api('api/meta');
     const fill = (sel, items, saved) => {
       sel.innerHTML = '<option value="">Все</option>' + items.map(v => `<option>${esc(v)}</option>`).join('');
       sel.value = items.includes(saved) ? saved : '';
@@ -36,7 +36,9 @@
     fill($('#dept'), state.meta.depts, store.get('dept'));
     const l = state.meta.last_load || {};
     $('#lastLoad').textContent = [l.segments && 'отрезки ' + fmtDT(l.segments), l.svetofor && 'светофор ' + fmtDT(l.svetofor)].filter(Boolean).join(' · ');
-    $('#mbState').textContent = state.meta.metabase_ready ? 'Metabase подключён. Данные обновляются по расписанию, кнопка обновит их сразу.' : 'Нужен API-ключ Metabase в настройках сервера (METABASE_API_KEY).';
+    $('#mbState').textContent = state.meta.metabase_ready ? 'Metabase подключён. Данные обновляются по расписанию, кнопка обновит их сразу.'
+      : state.meta.import_dir ? 'Выгрузки приходят в папку на сервере и забираются по расписанию. Кнопка заберёт их сразу.'
+      : 'Нужен API-ключ Metabase (METABASE_API_KEY) или папка выгрузок (IMPORT_DIR) в настройках сервера.';
   }
 
   // ---------- заказы ----------
@@ -45,7 +47,7 @@
       scope: $('#scope').value,
       manager: $('#manager').value, dept: $('#dept').value, q: $('#search').value.trim(),
     });
-    state.orders = await api('/api/orders?' + qs);
+    state.orders = await api('api/orders?' + qs);
     render();
   }
 
@@ -115,7 +117,7 @@
   const FLAGS = [['produced', 'П', 'Произведён'], ['stock', 'С', 'На складе'], ['ready', 'Г', 'Готов к отгрузке'], ['in_transit', 'В', 'В пути'], ['shipped', 'О', 'Отгружен'], ['invoiced', 'Ф', 'Отфактурирован']];
 
   async function openOrder(no) {
-    const d = await api('/api/orders/' + encodeURIComponent(no));
+    const d = await api('api/orders/' + encodeURIComponent(no));
     const p0 = d.positions.find(p => p.customer) || d.positions[0];
     const posRows = d.positions.map(p => `
       <tr class="pos" data-pos="${esc(p.pos)}">
@@ -168,7 +170,8 @@
       <form id="commentForm">
         <textarea name="text" placeholder="Что происходит с заказом, о чём договорились с клиентом" required></textarea>
         <div class="form-row" style="margin-top:8px">
-          <input type="text" name="author" placeholder="Ваше имя" value="${esc(store.get('author'))}">
+          ${state.meta.portal_user ? `<input type="hidden" name="author" value="${esc(state.meta.portal_user)}">`
+            : `<input type="text" name="author" placeholder="Ваше имя" value="${esc(store.get('author'))}">`}
           <button class="primary" type="submit">Добавить</button>
         </div>
       </form>
@@ -183,7 +186,7 @@
       e.preventDefault();
       const f = e.target;
       try {
-        await api(`/api/orders/${encodeURIComponent(no)}/bitrix`, {
+        await api(`api/orders/${encodeURIComponent(no)}/bitrix`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ task_id: f.task.value, deal_id: f.deal.value, author: store.get('author') }),
         });
@@ -193,7 +196,7 @@
     });
     if (state.meta.bitrix_ready && (d.bitrix.task_id || d.bitrix.deal_id)) {
       $('#bxLive').textContent = 'Запрашиваем Битрикс24…';
-      api(`/api/orders/${encodeURIComponent(no)}/bitrix/live`).then(b => {
+      api(`api/orders/${encodeURIComponent(no)}/bitrix/live`).then(b => {
         const parts = [];
         if (b.task) parts.push(`Задача «${b.task.title || ''}»: ${b.task.status || ''}, ответственный ${b.task.responsible || '—'}, срок ${fmt(b.task.deadline)}`);
         if (b.deal) parts.push(`Сделка «${b.deal.title || ''}», стадия ${b.deal.stage || '—'}`);
@@ -207,7 +210,7 @@
       e.preventDefault();
       const f = e.target;
       store.set('author', f.author.value);
-      await api(`/api/orders/${encodeURIComponent(no)}/comments`, {
+      await api(`api/orders/${encodeURIComponent(no)}/comments`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: f.text.value, author: f.author.value }),
       });
@@ -224,7 +227,7 @@
   // ---------- изменения ----------
   async function loadChanges() {
     const qs = new URLSearchParams({ days: $('#days').value, manager: $('#manager').value });
-    state.changes = await api('/api/changes?' + qs);
+    state.changes = await api('api/changes?' + qs);
     renderChanges();
   }
   function renderChanges() {
@@ -249,7 +252,7 @@
     const fd = new FormData();
     fd.append('file', file);
     try {
-      const r = await api('/api/upload', { method: 'POST', body: fd });
+      const r = await api('api/upload', { method: 'POST', body: fd });
       out.textContent = `${r.source === 'svetofor' ? 'Светофор' : 'Отчёт по отрезкам'}: строк ${r.rows}, позиций ${r.positions}, новых ${r.new}, изменений ${r.changes}.`;
       await loadMeta();
       await loadOrders();
@@ -264,7 +267,7 @@
     out.className = 'result';
     out.textContent = 'Забираем данные из Metabase…';
     try {
-      const r = await api('/api/sync', { method: 'POST' });
+      const r = await api('api/sync', { method: 'POST' });
       out.textContent = r.map(x => `${x.source}: ${x.positions ?? ''} поз., изменений ${x.changes ?? x.comments_for_changes ?? 0}`).join('; ');
       await loadMeta();
       await loadOrders();
