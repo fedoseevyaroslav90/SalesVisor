@@ -88,3 +88,42 @@ def test_api_comments_and_upload():
     assert card["comments"][0]["text"] == "Звонил клиенту"
     assert client.post("/api/upload", files={"file": ("x.csv", b"a,b\n1,2\n", "text/csv")}).status_code == 400
     assert client.post("/api/sync").status_code == 400  # Metabase не настроен
+
+
+def test_bitrix_manual_link_and_live():
+    import httpx
+    from salesvisor.bitrix import Bitrix, post_decade_changes
+
+    engine = make_engine("sqlite:///:memory:")
+    load_segments(engine, pd.DataFrame([seg_row("1200000005", "10", "1", "30 сентября, 2026", task="Громова")]), "d1")
+    load_svetofor(engine, pd.DataFrame([svet_row("1200000005", "10", "3Д09", "3Д09", "0", "green")]), "d1")
+    load_svetofor(engine, pd.DataFrame([svet_row("1200000005", "10", "3Д09", "1Д10", "10", "yellow")]), "d2")
+
+    calls = []
+
+    def handler(request: httpx.Request):
+        calls.append((request.url.path, request.content.decode()))
+        if request.url.path.endswith("tasks.task.get.json"):
+            return httpx.Response(200, json={"result": {"task": {"title": "Заказ 1200000005", "status": "3",
+                                                                  "deadline": "2026-10-10T18:00:00+05:00",
+                                                                  "responsible": {"name": "Громова Анна"}}}})
+        return httpx.Response(200, json={"result": True})
+
+    settings = Settings(database_url="sqlite:///:memory:", bitrix_webhook_url="https://b24.local/rest/1/key")
+    app = create_app(engine, settings)
+    client = TestClient(app)
+    assert client.get("/api/orders/1200000005").json()["bitrix"]["task_id"] is None
+    assert client.put("/api/orders/1200000005/bitrix", json={"task_id": "abc"}).status_code == 400
+    assert client.put("/api/orders/1200000005/bitrix", json={"task_id": "345579", "author": "Я"}).status_code == 200
+    card = client.get("/api/orders/1200000005").json()
+    assert card["bitrix"]["task_id"] == "345579" and card["bitrix"]["manual"]["set_by"] == "Я"
+    assert client.get("/api/orders").json()[0]["bitrix_task"] == "345579"
+
+    bx = Bitrix(settings, client=httpx.Client(base_url=settings.bitrix_webhook_url + "/", transport=httpx.MockTransport(handler)))
+    assert post_decade_changes(engine, bx) == 1
+    assert "345579" in calls[-1][1] and "3Д09 → 1Д10" in calls[-1][1]
+    assert post_decade_changes(engine, bx) == 0  # второй раз не отправляет
+
+    from salesvisor.bitrix import live_info
+    info = live_info(bx, "345579", None)
+    assert info["task"]["status"] == "Выполняется" and info["task"]["responsible"] == "Громова Анна"

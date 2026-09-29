@@ -7,12 +7,15 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import insert
+import re
+
+from sqlalchemy import delete, insert
 from sqlalchemy.engine import Engine
 
 from . import queries
 from .config import Settings, get_settings
-from .db import comments, make_engine
+from .bitrix import Bitrix, live_info
+from .db import bitrix_links, comments, make_engine
 from .ingest import detect_source, load_file, read_table
 from .metabase import MetabaseError
 from .sync import run_sync
@@ -24,6 +27,21 @@ class CommentIn(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     author: str = Field(default="", max_length=100)
     pos: str | None = None
+
+
+class BitrixLinkIn(BaseModel):
+    task_id: str = Field(default="", max_length=20)
+    deal_id: str = Field(default="", max_length=20)
+    author: str = Field(default="", max_length=100)
+
+
+def _id_or_none(v: str) -> str | None:
+    v = (v or "").strip()
+    if not v:
+        return None
+    if not re.fullmatch(r"\d{1,12}", v):
+        raise HTTPException(400, "Номер задачи или сделки должен состоять из цифр")
+    return v
 
 
 def create_app(engine: Engine | None = None, settings: Settings | None = None) -> FastAPI:
@@ -38,6 +56,7 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
     @app.get("/api/meta")
     def api_meta():
         return {**queries.meta(engine), "bitrix_task_url": settings.bitrix_task_url,
+                "bitrix_deal_url": settings.bitrix_deal_url, "bitrix_ready": bool(settings.bitrix_webhook_url),
                 "metabase_ready": bool(settings.metabase_url and (settings.metabase_api_key or settings.metabase_user))}
 
     @app.get("/api/orders")
@@ -57,6 +76,26 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
             conn.execute(insert(comments).values(order_no=order_no, pos=body.pos, text=body.text.strip(),
                                                  author=user_of(request, body.author)))
         return {"ok": True}
+
+    @app.put("/api/orders/{order_no}/bitrix")
+    def api_bitrix_link(order_no: str, body: BitrixLinkIn, request: Request):
+        task, deal = _id_or_none(body.task_id), _id_or_none(body.deal_id)
+        with engine.begin() as conn:
+            conn.execute(delete(bitrix_links).where(bitrix_links.c.order_no == order_no))
+            if task or deal:
+                conn.execute(insert(bitrix_links).values(order_no=order_no, task_id=task, deal_id=deal,
+                                                         set_by=user_of(request, body.author)))
+        return {"ok": True}
+
+    @app.get("/api/orders/{order_no}/bitrix/live")
+    def api_bitrix_live(order_no: str):
+        if not settings.bitrix_webhook_url:
+            return {"configured": False}
+        card = queries.order_card(engine, order_no)
+        if not card:
+            raise HTTPException(404, "Заказ не найден")
+        b = card["bitrix"]
+        return {"configured": True, **live_info(Bitrix(settings), b["task_id"], b["deal_id"])}
 
     @app.get("/api/changes")
     def api_changes(days: int = 7, manager: str = ""):

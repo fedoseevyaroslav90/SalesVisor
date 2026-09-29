@@ -24,6 +24,8 @@ class Settings:
     bitrix_webhook_url: str = field(default_factory=lambda: _env("BITRIX_WEBHOOK_URL").rstrip("/"))
     # Шаблон ссылки на задачу для интерфейса, например https://portal/company/personal/user/0/tasks/task/view/{id}/
     bitrix_task_url: str = field(default_factory=lambda: _env("BITRIX_TASK_URL"))
+    # Шаблон ссылки на сделку, например https://portal/crm/deal/details/{id}/
+    bitrix_deal_url: str = field(default_factory=lambda: _env("BITRIX_DEAL_URL"))
     # Писать ли комментарии в задачи при переносе декады
     bitrix_post_comments: bool = field(default_factory=lambda: _env("BITRIX_POST_COMMENTS", "0") == "1")
 

@@ -100,6 +100,16 @@ change_log = Table(
     Column("bitrix_sent", Boolean, nullable=False, default=False),
 )
 
+# Ручная связь заказа SAP с Битрикс24. Приоритетнее номера задачи, найденного в отчёте SAP
+bitrix_links = Table(
+    "bitrix_links", metadata,
+    Column("order_no", String(20), primary_key=True),
+    Column("task_id", String(20)),
+    Column("deal_id", String(20)),
+    Column("set_by", String(100)),
+    Column("set_at", DateTime, nullable=False, server_default=func.now()),
+)
+
 comments = Table(
     "comments", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),

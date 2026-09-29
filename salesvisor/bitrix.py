@@ -4,11 +4,11 @@ from __future__ import annotations
 from datetime import date
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import Engine
 
 from .config import Settings
-from .db import change_log, positions
+from .db import bitrix_links, change_log, positions
 
 
 class BitrixError(RuntimeError):
@@ -22,8 +22,11 @@ class Bitrix:
         self.http = client or httpx.Client(base_url=settings.bitrix_webhook_url + "/", timeout=60)
 
     def call(self, method: str, params: dict) -> dict:
-        r = self.http.post(f"{method}.json", json=params)
-        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        try:
+            r = self.http.post(f"{method}.json", json=params)
+            data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        except (httpx.HTTPError, ValueError) as e:
+            raise BitrixError(f"{method}: нет связи с Битрикс24 ({e.__class__.__name__})") from e
         if r.status_code != 200 or "error" in data:
             raise BitrixError(f"{method}: {data.get('error_description') or data.get('error') or r.status_code}")
         return data.get("result")
@@ -41,6 +44,9 @@ class Bitrix:
         res = self.call("tasks.task.get", {"taskId": task_id, "select": ["ID", "TITLE", "RESPONSIBLE_ID", "DEADLINE", "STATUS"]})
         return (res or {}).get("task")
 
+    def get_deal(self, deal_id: str) -> dict | None:
+        return self.call("crm.deal.get", {"id": deal_id})
+
     def add_task_comment(self, task_id: str, text: str) -> None:
         self.call("task.commentitem.add", {"TASKID": task_id, "FIELDS": {"POST_MESSAGE": text}})
 
@@ -54,11 +60,13 @@ def _fmt_decade(v):
 
 def post_decade_changes(engine: Engine, bx: Bitrix) -> int:
     """Пишет в задачу Битрикс24 комментарий о каждом переносе текущей декады, который ещё не отправлен."""
+    # Ручная привязка из карточки заказа важнее номера задачи из отчёта SAP
+    task = func.coalesce(bitrix_links.c.task_id, positions.c.bitrix_task).label("bitrix_task")
     stmt = (select(change_log.c.id, change_log.c.order_no, change_log.c.pos, change_log.c.old, change_log.c.new,
-                   positions.c.bitrix_task, positions.c.first_decade, positions.c.product)
+                   task, positions.c.first_decade, positions.c.product)
             .join(positions, (positions.c.order_no == change_log.c.order_no) & (positions.c.pos == change_log.c.pos))
-            .where(change_log.c.field == "current_decade", change_log.c.bitrix_sent.is_(False),
-                   positions.c.bitrix_task.is_not(None)))
+            .outerjoin(bitrix_links, bitrix_links.c.order_no == change_log.c.order_no)
+            .where(change_log.c.field == "current_decade", change_log.c.bitrix_sent.is_(False), task.is_not(None)))
     sent = 0
     with engine.begin() as conn:
         rows = list(conn.execute(stmt))
@@ -77,3 +85,29 @@ def post_decade_changes(engine: Engine, bx: Bitrix) -> int:
             conn.execute(update(change_log).where(change_log.c.id.in_([r.id for r in items])).values(bitrix_sent=True))
             sent += len(items)
     return sent
+
+
+TASK_STATUS = {"1": "Новая", "2": "Ждёт выполнения", "3": "Выполняется", "4": "Ждёт контроля",
+               "5": "Завершена", "6": "Отложена", "7": "Отклонена"}
+
+
+def live_info(bx: Bitrix, task_id: str | None, deal_id: str | None) -> dict:
+    """Сведения из Битрикс24 для карточки заказа: задача и сделка."""
+    out: dict = {}
+    if task_id:
+        try:
+            t = bx.get_task(task_id) or {}
+            resp = t.get("responsible") or {}
+            out["task"] = {"id": task_id, "title": t.get("title"), "deadline": t.get("deadline"),
+                           "status": TASK_STATUS.get(str(t.get("status")), t.get("status")),
+                           "responsible": resp.get("name") or t.get("responsibleId")}
+        except BitrixError as e:
+            out["task_error"] = str(e)
+    if deal_id:
+        try:
+            d = bx.get_deal(deal_id) or {}
+            out["deal"] = {"id": deal_id, "title": d.get("TITLE"), "stage": d.get("STAGE_ID"),
+                           "amount": d.get("OPPORTUNITY"), "assigned": d.get("ASSIGNED_BY_ID")}
+        except BitrixError as e:
+            out["deal_error"] = str(e)
+    return out

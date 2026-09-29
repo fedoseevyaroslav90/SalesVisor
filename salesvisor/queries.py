@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import desc, select
 from sqlalchemy.engine import Engine
 
-from .db import change_log, comments, positions, segments, snapshots
+from .db import bitrix_links, change_log, comments, positions, segments, snapshots
 
 COLOR_RANK = {"red": 0, "yellow": 1, "green": 2, None: 3}
 FIELD_NAMES = {
@@ -64,6 +64,7 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
         n_comments = defaultdict(int)
         for (order_no,) in conn.execute(select(comments.c.order_no)):
             n_comments[order_no] += 1
+        links = {r.order_no: r for r in conn.execute(select(bitrix_links))}
 
     if scope == "open":
         rows = [r for r in rows if not r["stale"]]
@@ -98,13 +99,17 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
             "earliest_first": min(firsts) if firsts else None,
             "segments_total": sum(p.get("segments_total") or 0 for p in ps),
             "segments_ready": sum((p.get("segments_ready") or 0) + (p.get("segments_shipped") or 0) for p in ps),
-            "bitrix_task": next((p["bitrix_task"] for p in ps if p.get("bitrix_task")), None),
+            "bitrix_task": _effective_task(links.get(order_no), ps),
+            "bitrix_deal": links[order_no].deal_id if order_no in links else None,
             "amount_rub": sum(p.get("amount_rub") or 0 for p in ps),
             "comments": n_comments.get(order_no, 0),
         }
-        if color and (color != "none" and order["color"] != color or color == "none" and order["color"]):
+        if color and color != "nolink" and (color != "none" and order["color"] != color or color == "none" and order["color"]):
             continue
-        if overdue_only and not order["overdue"]:
+        if color == "nolink":
+            if order["bitrix_task"] or order["bitrix_deal"]:
+                continue
+        elif overdue_only and not order["overdue"]:
             continue
         if q and not any(q in str(order.get(f) or "").lower() for f in ("order_no", "customer", "manager")) \
                 and not any(q in str(p.get("product") or "").lower() for p in ps):
@@ -114,6 +119,12 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
     # Сверху просроченные, потом красные, жёлтые, внутри — по величине смещения
     out.sort(key=lambda o: (0 if o["overdue"] else 1, COLOR_RANK.get(o["color"], 3), -(o["max_shift"] or 0), o["nearest_due"] or "9999"))
     return out
+
+
+def _effective_task(link, ps):
+    if link is not None and link.task_id:
+        return link.task_id
+    return next((p["bitrix_task"] for p in ps if p.get("bitrix_task")), None)
 
 
 def _decade_of(ps, label_field, date_field, pick):
@@ -137,12 +148,21 @@ def order_card(engine: Engine, order_no: str, today: date | None = None) -> dict
             select(change_log).where(change_log.c.order_no == order_no).order_by(desc(change_log.c.at), desc(change_log.c.id)))]
         notes = [_row(r) for r in conn.execute(
             select(comments).where(comments.c.order_no == order_no).order_by(desc(comments.c.created_at)))]
+        link = conn.execute(select(bitrix_links).where(bitrix_links.c.order_no == order_no)).first()
     ps.sort(key=lambda p: _pos_sort(p["pos"]))
     for p in ps:
         p["segments"] = sorted(segs.get(p["pos"], []), key=lambda s: _pos_sort(s["seg_no"]))
     for c in changes:
         c["field_name"] = FIELD_NAMES.get(c["field"], c["field"])
-    return {"order_no": order_no, "positions": ps, "changes": changes, "comments": notes}
+    sap_task = next((p["bitrix_task"] for p in ps if p.get("bitrix_task")), None)
+    bitrix = {
+        "sap_task": sap_task,
+        "sap_raw": next((p["bitrix_raw"] for p in ps if p.get("bitrix_raw")), None),
+        "task_id": _effective_task(link, ps),
+        "deal_id": link.deal_id if link else None,
+        "manual": _row(link) if link else None,
+    }
+    return {"order_no": order_no, "positions": ps, "changes": changes, "comments": notes, "bitrix": bitrix}
 
 
 def _pos_sort(v):

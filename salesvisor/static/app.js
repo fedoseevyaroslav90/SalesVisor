@@ -60,6 +60,7 @@
       ['yellow', 'Жёлтые', n('yellow')],
       ['green', 'Зелёные', n('green')],
       ['none', 'Без светофора', all.filter(o => !o.color).length],
+      ['nolink', 'Без связи с Битрикс24', all.filter(o => !o.bitrix_task && !o.bitrix_deal).length],
     ];
     $('#tiles').innerHTML = tiles.map(([code, label, v]) => {
       const active = code === 'late' ? state.overdue : !state.overdue && state.color === code;
@@ -73,14 +74,13 @@
     }));
 
     const rows = all.filter(o => (state.overdue ? o.overdue : true) &&
-      (!state.color || (state.color === 'none' ? !o.color : o.color === state.color)));
+      (!state.color || (state.color === 'none' ? !o.color : state.color === 'nolink' ? !o.bitrix_task && !o.bitrix_deal : o.color === state.color)));
     $('#empty').hidden = rows.length > 0;
     $('#empty').textContent = all.length ? 'Под фильтр ничего не попало.' : 'Данных пока нет. Загрузите выгрузки на вкладке «Загрузка».';
     $('#shown').textContent = rows.length > LIMIT ? `Показаны первые ${LIMIT} из ${rows.length}. Уточните фильтр или поиск.` : '';
-    const taskUrl = state.meta.bitrix_task_url;
     $('#orders tbody').innerHTML = rows.slice(0, LIMIT).map(o => {
       const ready = o.segments_total ? Math.round(100 * o.segments_ready / o.segments_total) : null;
-      const task = o.bitrix_task ? (taskUrl ? `<a href="${esc(taskUrl.replace('{id}', o.bitrix_task))}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(o.bitrix_task)}</a>` : esc(o.bitrix_task)) : '';
+      const task = [bxLink('task', o.bitrix_task), bxLink('deal', o.bitrix_deal)].filter(Boolean).join('<br>');
       return `<tr data-no="${esc(o.order_no)}">
         <td><span class="dot ${o.color || ''}" title="${esc(COLOR_NAME[o.color] || 'нет данных светофора')}"></span></td>
         <td><b>${esc(o.order_no)}</b>${o.comments ? ` <span class="sub" title="Комментарии">💬${o.comments}</span>` : ''}${o.overdue ? `<div class="late-tag">просрочено поз.: ${o.overdue}</div>` : ''}</td>
@@ -103,6 +103,13 @@
   $('#dept').addEventListener('change', e => { store.set('dept', e.target.value); reload(); });
   $('#search').addEventListener('input', reload);
   $('#scope').addEventListener('change', reload);
+
+  function bxLink(kind, id) {
+    if (!id) return '';
+    const tpl = kind === 'task' ? state.meta.bitrix_task_url : state.meta.bitrix_deal_url;
+    const label = (kind === 'task' ? 'задача ' : 'сделка ') + id;
+    return tpl ? `<a href="${esc(tpl.replace('{id}', id))}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(label)}</a>` : esc(label);
+  }
 
   // ---------- карточка заказа ----------
   const FLAGS = [['produced', 'П', 'Произведён'], ['stock', 'С', 'На складе'], ['ready', 'Г', 'Готов к отгрузке'], ['in_transit', 'В', 'В пути'], ['shipped', 'О', 'Отгружен'], ['invoiced', 'Ф', 'Отфактурирован']];
@@ -133,6 +140,19 @@
       <h2>Заказ ${esc(no)}</h2>
       <div class="muted">${esc(p0.customer || '')} · ${esc(p0.sales_dept || '')} · менеджер ${esc(p0.manager || '—')}${p0.bitrix_raw ? ' · Битрикс: ' + esc(p0.bitrix_raw) : ''}</div>
 
+      <h3>Битрикс24</h3>
+      <div id="bxBox">
+        <div>${d.bitrix.task_id || d.bitrix.deal_id ? [bxLink('task', d.bitrix.task_id), bxLink('deal', d.bitrix.deal_id)].filter(Boolean).join(' · ') : '<span class="late-tag">Заказ не связан с Битрикс24</span>'}
+          ${d.bitrix.manual ? `<span class="sub">указал ${esc(d.bitrix.manual.set_by || '')} ${fmtDT(d.bitrix.manual.set_at)}</span>` : d.bitrix.sap_task ? '<span class="sub">номер задачи взят из SAP</span>' : ''}</div>
+        <div id="bxLive" class="sub"></div>
+        <form id="bxForm" class="form-row" style="margin-top:6px">
+          <input type="text" name="task" placeholder="№ задачи" value="${esc(d.bitrix.manual ? d.bitrix.manual.task_id || '' : '')}" style="flex:0 0 130px;min-width:0">
+          <input type="text" name="deal" placeholder="№ сделки" value="${esc(d.bitrix.manual ? d.bitrix.manual.deal_id || '' : '')}" style="flex:0 0 130px;min-width:0">
+          <button class="secondary" type="submit">Сохранить связь</button>
+          <span class="error-text" id="bxErr"></span>
+        </form>
+      </div>
+
       <h3>Позиции</h3>
       <div class="table-wrap"><table class="mini">
         <thead><tr><th></th><th>Поз.</th><th>Изделие</th><th>Первая декада</th><th>Текущая декада</th><th>Смещ., дн.</th><th>Треб. дата</th><th>План отгрузки</th><th>Этап</th><th>Отрезки</th></tr></thead>
@@ -159,6 +179,30 @@
       const seg = document.querySelector(`#drawerBody tr.seg[data-for="${CSS.escape(tr.dataset.pos)}"]`);
       if (seg) seg.hidden = !seg.hidden;
     }));
+    $('#bxForm').addEventListener('submit', async e => {
+      e.preventDefault();
+      const f = e.target;
+      try {
+        await api(`/api/orders/${encodeURIComponent(no)}/bitrix`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: f.task.value, deal_id: f.deal.value, author: store.get('author') }),
+        });
+        openOrder(no);
+        loadOrders();
+      } catch (err) { $('#bxErr').textContent = err.message; }
+    });
+    if (state.meta.bitrix_ready && (d.bitrix.task_id || d.bitrix.deal_id)) {
+      $('#bxLive').textContent = 'Запрашиваем Битрикс24…';
+      api(`/api/orders/${encodeURIComponent(no)}/bitrix/live`).then(b => {
+        const parts = [];
+        if (b.task) parts.push(`Задача «${b.task.title || ''}»: ${b.task.status || ''}, ответственный ${b.task.responsible || '—'}, срок ${fmt(b.task.deadline)}`);
+        if (b.deal) parts.push(`Сделка «${b.deal.title || ''}», стадия ${b.deal.stage || '—'}`);
+        if (b.task_error) parts.push('Задача: ' + b.task_error);
+        if (b.deal_error) parts.push('Сделка: ' + b.deal_error);
+        const box = $('#bxLive');
+        if (box) box.textContent = parts.join(' · ');
+      }).catch(err => { const box = $('#bxLive'); if (box) box.textContent = err.message; });
+    }
     $('#commentForm').addEventListener('submit', async e => {
       e.preventDefault();
       const f = e.target;
