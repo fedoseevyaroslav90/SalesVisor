@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SalesVisor — контроль заказов</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">SalesVisor <span>контроль исполнения заказов</span></div>
+    <nav class="tabs">
+      <button data-tab="orders" class="active">Заказы</button>
+      <button data-tab="changes">Изменения</button>
+      <button data-tab="load">Загрузка</button>
+    </nav>
+    <span class="meta-line" id="lastLoad"></span>
+  </header>
+
+  <main>
+    <section id="tab-orders" class="tab active">
+      <div class="toolbar">
+        <label>Менеджер <select id="manager"><option value="">Все</option></select></label>
+        <label>Отдел <select id="dept"><option value="">Все</option></select></label>
+        <input id="search" type="search" placeholder="Заказ, клиент, изделие">
+        <label>Показать <select id="scope">
+          <option value="open">В работе</option>
+          <option value="stale">Хвосты: срок прошёл больше полугода назад</option>
+          <option value="all">Все, включая отгруженные</option>
+        </select></label>
+      </div>
+      <div class="tiles" id="tiles"></div>
+      <div class="table-wrap">
+        <table id="orders">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Заказ</th>
+              <th>Клиент</th>
+              <th>Отдел / менеджер</th>
+              <th title="Позиции по цветам светофора">Позиции</th>
+              <th title="Первая требуемая дата клиента">Первая декада</th>
+              <th title="Где заказ сейчас">Текущая декада</th>
+              <th title="Наибольшее смещение по позициям">Смещение</th>
+              <th title="Готово к отгрузке и отгружено отрезков">Отрезки</th>
+              <th>Битрикс</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p class="empty" id="empty" hidden></p>
+        <p class="meta-line" id="shown" style="padding:8px 12px"></p>
+      </div>
+    </section>
+
+    <section id="tab-changes" class="tab">
+      <div class="toolbar">
+        <label>За <select id="days"><option value="1">1 день</option><option value="7" selected>7 дней</option><option value="30">30 дней</option></select></label>
+        <label>Что <select id="field"><option value="">Всё</option><option value="current_decade">Текущая декада</option><option value="required_date">Треб. дата</option><option value="color">Цвет</option><option value="stage">Этап</option></select></label>
+      </div>
+      <div class="table-wrap">
+        <table class="changes" id="changes">
+          <thead><tr><th>Когда</th><th>Заказ</th><th>Поз.</th><th>Клиент</th><th>Менеджер</th><th>Что</th><th>Было</th><th>Стало</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p class="empty" id="changesEmpty" hidden>За этот период изменений нет.</p>
+      </div>
+    </section>
+
+    <section id="tab-load" class="tab">
+      <p class="lead">Обычно данные приходят сами из Metabase по расписанию. Здесь можно загрузить выгрузку вручную: CSV или Excel из вопросов «Отчёт по отрезкам xt» и «Светофор v2». Тип файла определяется по колонкам.</p>
+      <div class="cards">
+        <div class="card">
+          <h3>Загрузить файл</h3>
+          <p>Сначала отчёт по отрезкам, потом светофор.</p>
+          <div class="actions"><label class="btn">Выбрать файл<input id="file" type="file" accept=".csv,.xlsx" hidden></label></div>
+          <div class="result" id="loadResult"></div>
+        </div>
+        <div class="card">
+          <h3>Забрать из Metabase сейчас</h3>
+          <p id="mbState">Нужен API-ключ Metabase в настройках сервера.</p>
+          <div class="actions"><button class="btn" id="syncBtn">Обновить</button></div>
+          <div class="result" id="syncResult"></div>
+        </div>
+      </div>
+      <div class="legend">
+        <h3>Как читать светофор</h3>
+        <ul>
+          <li><span class="dot green"></span> смещение от первой требуемой даты 0 дней и меньше</li>
+          <li><span class="dot yellow"></span> смещение 10–30 дней</li>
+          <li><span class="dot red"></span> смещение больше 30 дней</li>
+          <li><span class="dot"></span> позиция ещё не переведена в Z4, первой даты нет</li>
+          <li><span class="late-tag">просрочено</span> текущая декада уже прошла, а позиция не отгружена</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <aside id="drawer" class="drawer" hidden>
+    <div class="drawer-inner wide">
+      <button class="close" id="closeDrawer" aria-label="Закрыть">×</button>
+      <div id="drawerBody"></div>
+    </div>
+  </aside>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+.git
+data
+.env
+prototype-v1
+tests
+**/__pycache__
