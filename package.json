@@ -1,0 +1,33 @@
+{
+  "name": "salesvisor",
+  "version": "1.0.0",
+  "description": "SalesVisor: контроль исполнения заказов покупателей",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "demo": "node scripts/demo.js",
+    "test": "node --test test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fedoseevyaroslav90/SalesVisor.git"
+  },
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/fedoseevyaroslav90/SalesVisor/issues"
+  },
+  "homepage": "https://github.com/fedoseevyaroslav90/SalesVisor#readme",
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "multer": "^2.4.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}

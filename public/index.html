@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SalesVisor — контроль заказов</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">SalesVisor <span>контроль исполнения заказов</span></div>
+    <nav class="tabs">
+      <button data-tab="orders" class="active">Заказы</button>
+      <button data-tab="import">Загрузка данных</button>
+      <button data-tab="settings">Настройки</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="tab-orders" class="tab active">
+      <div class="toolbar">
+        <label>Показать
+          <select id="manager"><option value="">Все заказы</option></select>
+        </label>
+        <input id="search" type="search" placeholder="Поиск: номер, клиент, изделие">
+        <label class="check"><input id="showClosed" type="checkbox"> Отгруженные и отменённые</label>
+        <span class="today" id="today"></span>
+      </div>
+
+      <div class="tiles" id="tiles"></div>
+
+      <div class="table-wrap">
+        <table id="orders">
+          <thead>
+            <tr>
+              <th>Статус</th>
+              <th>Заказ</th>
+              <th>Клиент</th>
+              <th>Менеджер</th>
+              <th title="Первая дата, которую обещали клиенту">Первое обещание</th>
+              <th title="Действующая обещанная дата">Обещано сейчас</th>
+              <th title="Плановое окончание производства">План готовности</th>
+              <th title="Дней запаса с учётом отгрузки">Запас</th>
+              <th title="По отчёту по отрезкам">Готовность</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p class="empty" id="empty" hidden>Заказов пока нет. Загрузите файлы на вкладке «Загрузка данных».</p>
+      </div>
+    </section>
+
+    <section id="tab-import" class="tab">
+      <p class="lead">Загружайте выгрузки в Excel (.xlsx) или CSV. Колонки ищутся по названиям, лишние колонки не мешают. Повторная загрузка обновляет данные: для плана и отрезков заменяются строки загруженных заказов, у заказов меняется обещанная дата, а первая обещанная дата сохраняется.</p>
+      <div class="cards">
+        <div class="card" data-kind="orders">
+          <h3>1. Заказы и обещанные даты</h3>
+          <p>Обязательно: <b>Номер заказа</b>. Также: Клиент, Менеджер, Изделие, Количество, Дата заказа, <b>Обещанная дата</b>, Причина переноса.</p>
+        </div>
+        <div class="card" data-kind="plan">
+          <h3>2. План производства</h3>
+          <p>Обязательно: <b>Номер заказа</b>, <b>Окончание</b>. Также: Операция, Начало.</p>
+        </div>
+        <div class="card" data-kind="segments">
+          <h3>3. Отчёт по отрезкам</h3>
+          <p>Обязательно: <b>Номер заказа</b>, <b>Факт</b>. Также: Отрезок, План, Дата.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-settings" class="tab">
+      <form id="settings" class="settings">
+        <label>Дней на упаковку и отгрузку после окончания производства
+          <input name="shipBufferDays" type="number" min="0" step="1">
+        </label>
+        <label>Предупреждать, если запас меньше, дней
+          <input name="warnDays" type="number" min="0" step="1">
+        </label>
+        <button type="submit">Сохранить</button>
+        <span id="settingsSaved" class="muted"></span>
+      </form>
+      <div class="legend">
+        <h3>Как считается статус</h3>
+        <ul>
+          <li><span class="badge overdue">Просрочен</span> обещанная дата прошла, отгрузки нет.</li>
+          <li><span class="badge risk">Не успеваем</span> план производства плюс отгрузка позже обещанной даты, или плановая готовность прошла, а по отрезкам заказ не закончен.</li>
+          <li><span class="badge noplan">Нет в плане</span> заказа нет в плане производства.</li>
+          <li><span class="badge warn">Мало запаса</span> успеваем, но запас меньше порога.</li>
+          <li><span class="badge ok">В срок</span> запаса достаточно или заказ уже сделан.</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <aside id="drawer" class="drawer" hidden>
+    <div class="drawer-inner">
+      <button class="close" id="closeDrawer" aria-label="Закрыть">×</button>
+      <div id="drawerBody"></div>
+    </div>
+  </aside>
+
+  <script src="app.js"></script>
+</body>
+</html>
