@@ -9,7 +9,6 @@
   };
   const num = (v, d = 1) => (v ? v.toLocaleString('ru-RU', { maximumFractionDigits: d, minimumFractionDigits: 0 }) : '0');
   const COLOR_NAME = { red: 'красный', yellow: 'жёлтый', green: 'зелёный' };
-  const LIMIT = 400;
   const state = { meta: {}, orders: [], color: '', overdue: false, changes: [] };
 
   async function api(url, opts) {
@@ -39,6 +38,11 @@
     fill($('#manager'), state.meta.managers, store.get('manager'));
     fill($('#dept'), state.meta.depts, store.get('dept'));
     fill($('#dayLine'), state.meta.lines || [], '');
+    const line = $('#fLine').value;  // справочники перечитываются после загрузки — выбор не теряем
+    $('#fLine').innerHTML = '<option value="">Все</option><option value="-">Не в плане производства</option>'
+      + (state.meta.lines || []).map(v => `<option>${esc(v)}</option>`).join('');
+    $('#fLine').value = line;
+    $('#customerList').innerHTML = (state.meta.customers || []).map(v => `<option value="${esc(v)}">`).join('');
     const loadTab = document.querySelector('.tabs button[data-tab="load"]');
     if (loadTab) loadTab.hidden = state.meta.can_upload === false;
     $('#portalLink').hidden = !state.meta.portal_user;  // открыт через портал «Инкаб ИИ» — ссылка назад
@@ -51,16 +55,161 @@
       : 'Нужен API-ключ Metabase (METABASE_API_KEY) или папка выгрузок (IMPORT_DIR) в настройках сервера.';
   }
 
-  // ---------- заказы ----------
-  async function loadOrders() {
-    const qs = new URLSearchParams({
-      scope: $('#scope').value,
-      manager: $('#manager').value, dept: $('#dept').value, q: $('#search').value.trim(),
+  // ---------- заказы и позиции: отбор, сортировка, ссылка на отбор, выгрузка ----------
+  const PAGE = 400, POS_PAGE = 300;
+  Object.assign(state, { view: 'orders', sort: '', posSort: '', shown: PAGE, positions: [], posTotal: 0, seq: 0 });
+  const flagInputs = () => [...document.querySelectorAll('#filters [data-flag]')];
+  const collator = new Intl.Collator('ru', { numeric: true, sensitivity: 'base' });
+
+  // Сортировка на экране: пустые значения — всегда внизу; строки — по-русски и с числами «по смыслу»
+  function sortRows(rows, sort, keyOf) {
+    if (!sort) return rows;
+    const desc = sort[0] === '-', key = keyOf(desc ? sort.slice(1) : sort);
+    const filled = [], empty = [];
+    for (const r of rows) { const k = key(r); (k === null || k === undefined || k === '' ? empty : filled).push([k, r]); }
+    filled.sort((a, b) => (typeof a[0] === 'number' && typeof b[0] === 'number' ? a[0] - b[0]
+      : collator.compare(String(a[0]), String(b[0]))) * (desc ? -1 : 1));
+    return filled.map(x => x[1]).concat(empty.map(x => x[1]));
+  }
+  // Щелчок по заголовку: по возрастанию → по убыванию → порядок по умолчанию
+  function bindSort(table, get, set) {
+    document.querySelectorAll(`${table} th[data-sort]`).forEach(th => th.addEventListener('click', () => {
+      const f = th.dataset.sort, cur = get();
+      set(cur === f ? '-' + f : cur === '-' + f ? '' : f);
+    }));
+  }
+  function markSort(table, sort) {
+    document.querySelectorAll(`${table} th[data-sort]`).forEach(th => {
+      th.classList.toggle('sort-asc', sort === th.dataset.sort);
+      th.classList.toggle('sort-desc', sort === '-' + th.dataset.sort);
+      th.title = th.title.replace(/ · сортировка.*$/, '') + ' · сортировка — щелчок по заголовку';
     });
-    state.orders = await api('api/orders?' + qs);
-    render();
+  }
+  const RANK = { red: 0, yellow: 1, green: 2 };
+  const orderKey = f => f === 'color' ? (o => RANK[o.color] ?? 3)
+    : f === 'ready' ? (o => (o.segments_total ? o.segments_ready / o.segments_total : null))
+    : f === 'manager' ? (o => [o.sales_dept, o.manager].filter(Boolean).join(' ') || null)
+    : (o => o[f]);
+
+  // Периоды отбора по сроку: декада — 1–10, 11–20, 21–конец месяца
+  const isoDate = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  function periodRange(code) {
+    const t = new Date((state.meta.today || isoDate(new Date())) + 'T00:00');
+    const y = t.getFullYear(), m = t.getMonth(), day = t.getDate(), k = day <= 10 ? 1 : day <= 20 ? 2 : 3;
+    const dec = (mm, kk) => [new Date(y, mm, [1, 11, 21][kk - 1]), kk < 3 ? new Date(y, mm, kk * 10) : new Date(y, mm + 1, 0)];
+    const r = {
+      past: [null, new Date(y, m, day - 1)],
+      dec: dec(m, k),
+      nextdec: k < 3 ? dec(m, k + 1) : dec(m + 1, 1),
+      month: [new Date(y, m, 1), new Date(y, m + 1, 0)],
+      prevmonth: [new Date(y, m - 1, 1), new Date(y, m, 0)],
+      nextmonth: [new Date(y, m + 1, 1), new Date(y, m + 2, 0)],
+    }[code];
+    return r ? r.map(d => (d ? isoDate(d) : '')) : null;
+  }
+  const PERIODS = [['#fDue', '#fDuePeriod', '#fDueFrom', '#fDueTo', 'due'], ['#fFirst', '#fFirstPeriod', '#fFirstFrom', '#fFirstTo', 'first']];
+
+  function baseParams() { return { scope: $('#scope').value, manager: $('#manager').value, dept: $('#dept').value }; }
+  function filterParams() {
+    const p = {}, v = id => $(id).value.trim();
+    if (v('#search')) p.q = v('#search');
+    if (v('#fCustomer')) p.customer = v('#fCustomer');
+    if (v('#fLine')) p.line = v('#fLine');
+    if (v('#fStage')) p.stage = v('#fStage');
+    for (const [sel, , from, to, key] of PERIODS) {
+      const code = $(sel).value, r = code === 'custom' ? [v(from), v(to)] : code ? periodRange(code) : null;
+      if (r && r[0]) p[key + '_from'] = r[0];
+      if (r && r[1]) p[key + '_to'] = r[1];
+    }
+    if (v('#fShift')) p.shift_min = v('#fShift');
+    const flags = flagInputs().filter(i => i.checked).map(i => i.dataset.flag);
+    if (flags.length) p.flags = flags.join(',');
+    return p;
+  }
+  // Словесное описание отбора — в первую строку выгрузки Excel
+  function describeFilters() {
+    const text = sel => { const el = $(sel); return el.tagName === 'SELECT' ? el.options[el.selectedIndex]?.text : el.value; };
+    const parts = [state.view === 'orders' ? 'Заказы' : 'Позиции', text('#scope')];
+    for (const [sel, name] of [['#manager', 'менеджер'], ['#dept', 'отдел'], ['#search', 'поиск'], ['#fCustomer', 'клиент'],
+      ['#fLine', 'линия'], ['#fStage', 'этап'], ['#fShift', 'смещение от, дн.']]) if ($(sel).value) parts.push(`${name}: ${text(sel)}`);
+    const p = filterParams();
+    if (p.due_from || p.due_to) parts.push(`срок: ${p.due_from ? fmt(p.due_from) : '…'}–${p.due_to ? fmt(p.due_to) : '…'}`);
+    if (p.first_from || p.first_to) parts.push(`первая дата: ${p.first_from ? fmt(p.first_from) : '…'}–${p.first_to ? fmt(p.first_to) : '…'}`);
+    const flags = flagInputs().filter(i => i.checked).map(i => i.parentElement.textContent.trim());
+    if (flags.length) parts.push(flags.join(', '));
+    if (state.view === 'orders' && (state.color || state.overdue)) parts.push('плитка: ' + ($(`.tile[data-code="${state.overdue ? 'late' : state.color}"] .l`)?.textContent || ''));
+    return 'Отбор: ' + parts.join('; ');
   }
 
+  // Отбор живёт в адресе страницы (#…): ссылку можно отправить коллеге, после обновления страницы он сохраняется
+  const HASH = { scope: '#scope', manager: '#manager', dept: '#dept', q: '#search', customer: '#fCustomer', line: '#fLine',
+    stage: '#fStage', due: '#fDue', due_from: '#fDueFrom', due_to: '#fDueTo', first: '#fFirst', first_from: '#fFirstFrom',
+    first_to: '#fFirstTo', shift: '#fShift' };
+  function saveHash() {
+    const h = new URLSearchParams();
+    if (state.view !== 'orders') h.set('view', state.view);
+    for (const [k, sel] of Object.entries(HASH)) if ($(sel).value && !(k === 'scope' && $(sel).value === 'open')) h.set(k, $(sel).value);
+    const flags = flagInputs().filter(i => i.checked).map(i => i.dataset.flag);
+    if (flags.length) h.set('flags', flags.join(','));
+    if (state.view === 'orders' && (state.color || state.overdue)) h.set('tile', state.overdue ? 'late' : state.color);
+    const sort = state.view === 'orders' ? state.sort : state.posSort;
+    if (sort) h.set('sort', sort);
+    const s = h.toString();
+    history.replaceState(null, '', location.pathname + location.search + (s ? '#' + s : ''));
+    store.set('lastView', s);  // открыл раздел без ссылки — вернётся его последний отбор
+  }
+  function readHash() {
+    const h = new URLSearchParams(location.hash.slice(1) || store.get('lastView'));
+    if (![...h.keys()].length) return;
+    for (const [k, sel] of Object.entries(HASH)) if (h.has(k)) $(sel).value = h.get(k);
+    const flags = (h.get('flags') || '').split(',');
+    flagInputs().forEach(i => { i.checked = flags.includes(i.dataset.flag); });
+    const tile = h.get('tile') || '';
+    state.overdue = tile === 'late';
+    state.color = tile === 'late' ? '' : tile;
+    state.view = h.get('view') === 'positions' ? 'positions' : 'orders';
+    if (state.view === 'orders') state.sort = h.get('sort') || ''; else state.posSort = h.get('sort') || '';
+  }
+  // Подсветка заданных фильтров, число их на кнопке «Отбор», видимость полей своего периода
+  function markFilters() {
+    let n = 0;
+    for (const el of document.querySelectorAll('#filters select, #filters input:not([type=checkbox])')) {
+      const on = !!el.value && !el.closest('.period[hidden]');
+      el.classList.toggle('active-filter', on);
+      n += on && !el.closest('.period') ? 1 : 0;
+    }
+    n += flagInputs().filter(i => i.checked).length;
+    for (const [sel, span] of PERIODS) $(span).hidden = $(sel).value !== 'custom';
+    $('#filtersCount').hidden = !n;
+    $('#filtersCount').textContent = n;
+  }
+
+  async function loadOrders() {
+    markFilters();
+    saveHash();
+    const seq = ++state.seq;  // быстрый ввод: устаревший ответ не перерисовывает новый отбор
+    if (state.view === 'positions') return loadPositions(false, seq);
+    const orders = await api('api/orders?' + new URLSearchParams({ ...baseParams(), ...filterParams() }));
+    if (seq !== state.seq) return;
+    state.orders = orders;
+    state.shown = PAGE;
+    render();
+  }
+  async function loadPositions(append, seq = ++state.seq) {
+    const qs = new URLSearchParams({ ...baseParams(), ...filterParams(), sort: state.posSort,
+      offset: append ? state.positions.length : 0, limit: POS_PAGE });
+    const d = await api('api/positions?' + qs);
+    if (seq !== state.seq) return;
+    state.positions = append ? state.positions.concat(d.rows) : d.rows;
+    state.posTotal = d.total;
+    renderPositions();
+  }
+
+  function tileRows(all) {
+    return all.filter(o => (state.overdue ? o.overdue : true) &&
+      (!state.color || (state.color === 'none' ? !o.color : state.color === 'nolink' ? !o.bitrix_task && !o.bitrix_deal
+        : state.color === 'quality' ? o.quality > 0 : o.color === state.color)));
+  }
   function render() {
     const all = state.orders;
     const n = c => all.filter(o => o.color === c).length;
@@ -83,16 +232,18 @@
       const c = t.dataset.code;
       state.overdue = c === 'late';
       state.color = c === 'late' ? '' : c;
+      state.shown = PAGE;
+      saveHash();
       render();
     }));
 
-    const rows = all.filter(o => (state.overdue ? o.overdue : true) &&
-      (!state.color || (state.color === 'none' ? !o.color : state.color === 'nolink' ? !o.bitrix_task && !o.bitrix_deal
-        : state.color === 'quality' ? o.quality > 0 : o.color === state.color)));
+    const rows = sortRows(tileRows(all), state.sort, orderKey);
+    const filtered = !!Object.keys(filterParams()).length;
+    $('#found').textContent = filtered || state.color || state.overdue
+      ? `Под отбор: ${rows.length} заказ(ов); строки считаются по подошедшим позициям.` : '';
     $('#empty').hidden = rows.length > 0;
-    $('#empty').textContent = all.length ? 'Под фильтр ничего не попало.' : 'Данных пока нет. Загрузите выгрузки на вкладке «Загрузка».';
-    $('#shown').textContent = rows.length > LIMIT ? `Показаны первые ${LIMIT} из ${rows.length}. Уточните фильтр или поиск.` : '';
-    $('#orders tbody').innerHTML = rows.slice(0, LIMIT).map(o => {
+    $('#empty').textContent = all.length || filtered ? 'Под отбор ничего не попало.' : 'Данных пока нет. Загрузите выгрузки на вкладке «Загрузка».';
+    $('#orders tbody').innerHTML = rows.slice(0, state.shown).map(o => {
       const ready = o.segments_total ? Math.round(100 * o.segments_ready / o.segments_total) : null;
       const task = [bxLink('task', o.bitrix_task), bxLink('deal', o.bitrix_deal)].filter(Boolean).join('<br>');
       return `<tr data-no="${esc(o.order_no)}">
@@ -109,14 +260,108 @@
       </tr>`;
     }).join('');
     document.querySelectorAll('#orders tbody tr').forEach(tr => tr.addEventListener('click', () => openOrder(tr.dataset.no)));
+    const rest = rows.length - state.shown;
+    $('#ordersMore').hidden = rest <= 0;
+    $('#ordersMore button').textContent = `Показать ещё ${Math.min(rest, PAGE)} (всего ${rows.length})`;
+    markSort('#orders', state.sort);
   }
 
+  function renderPositions() {
+    const rows = state.positions;
+    $('#found').textContent = `Под отбор: ${state.posTotal} позиций` + (state.posTotal > rows.length ? `, показаны ${rows.length}` : '') + '.';
+    $('#posEmpty').hidden = rows.length > 0;
+    $('#posEmpty').textContent = 'Под отбор ничего не попало.';
+    $('#positions tbody').innerHTML = rows.map(p => `<tr data-no="${esc(p.order_no)}">
+        <td><span class="dot ${COLOR_NAME[p.color] ? p.color : ''}" title="${esc(COLOR_NAME[p.color] || 'нет данных светофора')}"></span></td>
+        <td><b>${esc(p.order_no)}</b> / ${esc(p.pos)}</td>
+        <td>${esc(p.customer || '—')}</td>
+        <td>${esc(p.product || '')}</td>
+        <td>${esc(p.manager || '')}</td>
+        <td>${esc(p.first_decade || '—')}</td>
+        <td>${esc(p.current_decade || fmt(p.due_date))}${p.overdue ? '<div class="late-tag">просрочено</div>' : ''}</td>
+        <td class="num ${p.shift_days > 30 ? 'neg' : ''}">${p.shift_days ?? '—'}</td>
+        <td>${fmt(p.plan_ship_date || p.invoice_plan_date)}</td>
+        <td>${p.line ? `<b>${esc(p.line)}</b><div class="sub">${fmt(p.plan_end_date)} ${esc(p.plan_end_time || '')}</div>` : '<span class="muted">—</span>'}</td>
+        <td>${esc(p.stage)}${p.disp_decade ? `<div class="sub">${esc(p.disp_decade)}</div>` : ''}</td>
+        <td>${p.segments_total ? `${p.segments_ready}/${p.segments_total}` : '—'}</td>
+        <td>${p.quality ? `<div class="q-tag">несоотв.: ${p.quality}</div>` : ''}${p.comments ? `<span class="sub" title="Комментарии к заказу">💬${p.comments}</span> ` : ''}${bxLink('task', p.bitrix_task)}</td>
+      </tr>`).join('');
+    document.querySelectorAll('#positions tbody tr').forEach(tr => tr.addEventListener('click', () => openOrder(tr.dataset.no)));
+    const rest = state.posTotal - rows.length;
+    $('#positionsMore').hidden = rest <= 0;
+    $('#positionsMore button').textContent = `Показать ещё ${Math.min(rest, POS_PAGE)} (всего ${state.posTotal})`;
+    markSort('#positions', state.posSort);
+  }
+
+  function setView(v) {
+    state.view = v;
+    document.querySelectorAll('.view-switch button').forEach(b => b.classList.toggle('on', b.dataset.view === v));
+    $('#ordersWrap').hidden = v !== 'orders';
+    $('#positionsWrap').hidden = v === 'orders';
+    $('#tiles').hidden = v !== 'orders';
+  }
+  document.querySelectorAll('.view-switch button').forEach(b => b.addEventListener('click', () => {
+    if (b.dataset.view === state.view) return;
+    setView(b.dataset.view);
+    loadOrders().catch(showErr);
+  }));
+  bindSort('#orders', () => state.sort, s => { state.sort = s; state.shown = PAGE; saveHash(); render(); });
+  bindSort('#positions', () => state.posSort, s => { state.posSort = s; loadOrders().catch(showErr); });
+  $('#ordersMore button').addEventListener('click', () => { state.shown += PAGE; render(); });
+  $('#positionsMore button').addEventListener('click', () => loadPositions(true).catch(showErr));
+
   let timer;
-  const reload = () => { clearTimeout(timer); timer = setTimeout(() => loadOrders().catch(showErr), 250); };
+  const reload = () => { clearTimeout(timer); timer = setTimeout(() => loadOrders().catch(showErr), 300); };
   $('#manager').addEventListener('change', e => { store.set('manager', e.target.value); reload(); });
   $('#dept').addEventListener('change', e => { store.set('dept', e.target.value); reload(); });
   $('#search').addEventListener('input', reload);
   $('#scope').addEventListener('change', reload);
+  document.querySelectorAll('#filters select, #filters input').forEach(el => el.addEventListener(el.type === 'text' || el.type === 'number' || el.type === 'search' || el.id === 'fCustomer' ? 'input' : 'change', reload));
+  $('#fReset').addEventListener('click', () => {
+    document.querySelectorAll('#filters select, #filters input:not([type=checkbox])').forEach(el => { el.value = ''; });
+    flagInputs().forEach(i => { i.checked = false; });
+    state.color = ''; state.overdue = false;
+    reload();
+  });
+  $('#filtersToggle').addEventListener('click', () => {
+    const open = $('#filters').hidden;
+    $('#filters').hidden = !open;
+    $('#filtersToggle').setAttribute('aria-expanded', String(open));
+    store.set('filtersClosed', open ? '' : '1');
+  });
+  if (store.get('filtersClosed')) { $('#filters').hidden = true; $('#filtersToggle').setAttribute('aria-expanded', 'false'); }
+
+  $('#exportBtn').addEventListener('click', () => {
+    const p = { ...baseParams(), ...filterParams(), view: state.view, note: describeFilters(),
+      sort: state.view === 'orders' ? state.sort : state.posSort };
+    if (state.view === 'orders') { if (state.overdue) p.overdue = 'true'; else if (state.color) p.color = state.color; }
+    location.href = 'api/export.xlsx?' + new URLSearchParams(p);
+  });
+  $('#copyLink').addEventListener('click', async () => {
+    const b = $('#copyLink'), was = b.textContent;
+    try { await navigator.clipboard.writeText(location.href); b.textContent = 'Ссылка скопирована'; }
+    catch { window.prompt('Скопируйте ссылку на отбор:', location.href); }
+    setTimeout(() => { b.textContent = was; }, 2000);
+  });
+
+  // Выгрузка таблицы на экране в CSV для Excel (разделитель «;», UTF-8 с BOM). Значения, похожие на формулы, экранируются
+  function downloadCsv(name, header, rows) {
+    const cell = v => {
+      let s = String(v ?? '');
+      if (/^[=+\-@]/.test(s) && !/^-?\d+([.,]\d+)?$/.test(s)) s = "'" + s;
+      return /[;"\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const text = '﻿' + [header, ...rows].map(r => r.map(cell).join(';')).join('\r\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
+    a.download = name;
+    document.body.append(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }
+  const stamp = () => new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+  // Строка «ищем везде» для поиска на вкладках: подстрока в любом из полей
+  const matchText = (q, ...vals) => !q || vals.some(v => String(v ?? '').toLowerCase().includes(q));
 
   function bxLink(kind, id) {
     if (!id) return '';
@@ -294,13 +539,18 @@
       $('#dayLine').value = '';
       renderDay();
     }));
-    const rows = d.positions.filter(r => (!what || (what === 'make' ? r.task_make : r.task_ship)) &&
-      (!lineSel || (lineSel === '-' ? !r.line : r.line === lineSel)));
+    const q = $('#daySearch').value.trim().toLowerCase();
+    const rows = sortRows(d.positions.filter(r => (!what || (what === 'make' ? r.task_make : r.task_ship)) &&
+      (!lineSel || (lineSel === '-' ? !r.line : r.line === lineSel)) &&
+      matchText(q, r.order_no, r.customer, r.product, r.manager, r.line)), state.daySort, dayKey);
+    state.dayRows = rows;
     $('#dayEmpty').hidden = rows.length > 0;
-    $('#dayEmpty').textContent = 'На этот день по плану ничего нет.';
+    $('#dayEmpty').textContent = q ? 'Под поиск ничего не попало.' : 'На этот день по плану ничего нет.';
     let prev = null;
+    markSort('#dayTable', state.daySort);
     $('#dayTable tbody').innerHTML = rows.slice(0, 1500).map(r => {
-      const head = r.line !== prev && hasPlan ? `<tr class="line-head"><td colspan="8">${esc(r.line || 'Линия не указана')}</td></tr>` : '';
+      // группировка по линиям — только в порядке по умолчанию; при сортировке по столбцу строки идут подряд
+      const head = !state.daySort && r.line !== prev && hasPlan ? `<tr class="line-head"><td colspan="8">${esc(r.line || 'Линия не указана')}</td></tr>` : '';
       prev = r.line;
       return head + `<tr data-no="${esc(r.order_no)}">
         <td>${r.plan_end_date ? fmt(r.plan_end_date) + ' ' + esc(r.plan_end_time || '') : '—'}</td>
@@ -318,6 +568,23 @@
   ['#dayDate', '#dayBacklog'].forEach(id => $(id).addEventListener('change', () => loadDay().catch(showDayErr)));
   $('#dayLine').addEventListener('change', () => { state.dayLine = ''; renderDay(); });
   $('#dayWhat').addEventListener('change', renderDay);
+  $('#daySearch').addEventListener('input', renderDay);
+  state.daySort = '';
+  const dayKey = f => f === 'plan_end' ? (r => (r.plan_end_date ? r.plan_end_date + ' ' + (r.plan_end_time || '') : null))
+    : f === 'order_no' ? (r => `${r.order_no}/${r.pos}`)
+    : f === 'state' ? (r => (r.late ? 0 : (r.task_make && !r.make_done) || (r.task_ship && !r.ship_done) ? 1 : 2))
+    : (r => r[f]);
+  bindSort('#dayTable', () => state.daySort, v => { state.daySort = v; renderDay(); });
+  $('#dayExport').addEventListener('click', () => {
+    const rows = state.dayRows || [];
+    downloadCsv(`SalesVisor_план_на_${$('#dayDate').value || 'день'}.csv`,
+      ['Окончание', 'Время', 'Заказ', 'Поз.', 'Клиент', 'Изделие', 'Менеджер', 'Линия', 'План отгрузки', 'Этап',
+        'Произвести', 'Отгрузить', 'Отстаёт', 'Производство позже отгрузки', 'Несоответствия'],
+      rows.map(r => [fmt(r.plan_end_date), r.plan_end_time || '', r.order_no, r.pos, r.customer || '', r.product || '',
+        r.manager || '', r.line || '', fmt(r.ship_plan), r.stage || '',
+        r.task_make ? (r.make_done ? 'произведено' : 'произвести') : '', r.task_ship ? (r.ship_done ? 'отгружено' : 'отгрузить') : '',
+        r.late ? 'да' : '', r.risk ? 'да' : '', (r.quality || []).join('; ')]));
+  });
 
   // ---------- диспетчерский ----------
   const MONTHS_UP = ['ЯНВАРЬ', 'ФЕВРАЛЬ', 'МАРТ', 'АПРЕЛЬ', 'МАЙ', 'ИЮНЬ', 'ИЮЛЬ', 'АВГУСТ', 'СЕНТЯБРЬ', 'ОКТЯБРЬ', 'НОЯБРЬ', 'ДЕКАБРЬ'];
@@ -372,8 +639,11 @@
     ['#dispDetailTitle', '#dispDetailBar', '#dispDetailWrap'].forEach(id => { $(id).hidden = !show; });
     if (!show) return;
     $('#dispDetailTitle').textContent = 'Позиции: ' + d.decade;
-    const f = $('#dispFilter').value;
-    const rows = d.positions.filter(r => !f || (f === 'todo' ? r.segs_ready < r.segs : !!r.mismatch));
+    const f = $('#dispFilter').value, q = $('#dispSearch').value.trim().toLowerCase();
+    const rows = sortRows(d.positions.filter(r => (!f || (f === 'todo' ? r.segs_ready < r.segs : !!r.mismatch)) &&
+      matchText(q, r.order_no, r.customer, r.product, r.manager)), state.dispSort, dispKey);
+    state.dispRows = rows;
+    markSort('#dispDetail', state.dispSort);
     $('#dispDetail tbody').innerHTML = rows.slice(0, 1000).map(r => `<tr data-no="${esc(r.order_no)}">
       <td><b>${esc(r.order_no)}</b> / ${esc(r.pos)}${r.counted ? '' : ' <span class="sub">не считать</span>'}</td>
       <td>${esc(r.customer || '—')}</td><td>${esc(r.product || '')}</td><td>${esc(r.manager || '')}</td>
@@ -385,6 +655,21 @@
     document.querySelectorAll('#dispDetail tbody tr[data-no]').forEach(tr => tr.addEventListener('click', () => openOrder(tr.dataset.no).catch(showErr)));
   }
   $('#dispFilter').addEventListener('change', renderDisp);
+  $('#dispSearch').addEventListener('input', renderDisp);
+  state.dispSort = '';
+  const dispKey = f => f === 'order_no' ? (r => `${r.order_no}/${r.pos}`)
+    : f === 'ready_share' ? (r => (r.segs ? r.segs_ready / r.segs : null))
+    : (r => r[f]);
+  bindSort('#dispDetail', () => state.dispSort, v => { state.dispSort = v; renderDisp(); });
+  $('#dispExport').addEventListener('click', () => {
+    const rows = state.dispRows || [];
+    downloadCsv(`SalesVisor_диспетчерский_${(state.dispDecade || 'декада').replace(/[^\wА-Яа-яЁё]+/g, '_')}.csv`,
+      ['Заказ', 'Поз.', 'Клиент', 'Изделие', 'Менеджер', 'Декада', 'ПО', 'ГП, км', 'ГП, шт', 'МЗ, руб', 'ВП, руб',
+        'Отрезков с партией', 'Отрезков всего', 'Этап по отрезкам', 'Сверка'],
+      rows.map(r => [r.order_no, r.pos, r.customer || '', r.product || '', r.manager || '', r.decade || '',
+        r.counted ? 'считать' : 'не считать', r.km ?? '', r.pcs ?? '', r.mz ?? '', r.vp ?? '', r.segs_ready, r.segs,
+        r.stage || '', r.mismatch || 'сходится']));
+  });
   $('#dispAll').addEventListener('change', renderDisp);
 
   // ---------- изменения ----------
@@ -394,8 +679,11 @@
     renderChanges();
   }
   function renderChanges() {
-    const f = $('#field').value;
-    const rows = state.changes.filter(c => !f || c.field === f);
+    const f = $('#field').value, q = $('#changesSearch').value.trim().toLowerCase();
+    const rows = sortRows(state.changes.filter(c => (!f || c.field === f) &&
+      matchText(q, c.order_no, c.customer, c.manager, c.product, fmtVal(c.old), fmtVal(c.new))), state.changesSort, k => (c => c[k]));
+    state.changesRows = rows;
+    markSort('#changes', state.changesSort);
     $('#changesEmpty').hidden = rows.length > 0;
     $('#changes tbody').innerHTML = rows.map(c => `<tr data-no="${esc(c.order_no)}">
       <td>${fmtDT(c.at)}</td><td><b>${esc(c.order_no)}</b></td><td>${esc(c.pos)}</td><td>${esc(c.customer || '')}</td>
@@ -404,6 +692,14 @@
   }
   $('#days').addEventListener('change', loadChanges);
   $('#field').addEventListener('change', renderChanges);
+  $('#changesSearch').addEventListener('input', renderChanges);
+  state.changesSort = '';
+  bindSort('#changes', () => state.changesSort, v => { state.changesSort = v; renderChanges(); });
+  $('#changesExport').addEventListener('click', () => {
+    downloadCsv(`SalesVisor_изменения_${stamp()}.csv`, ['Когда', 'Заказ', 'Поз.', 'Клиент', 'Менеджер', 'Изделие', 'Что', 'Было', 'Стало'],
+      (state.changesRows || []).map(c => [fmtDT(c.at), c.order_no, c.pos, c.customer || '', c.manager || '', c.product || '',
+        c.field_name, fmtVal(c.old), fmtVal(c.new)]));
+  });
 
   // ---------- загрузка ----------
   const SOURCE_NAME = { segments: 'Отчёт по отрезкам', svetofor: 'Светофор', plan: 'План производства (ZPP context)', dispatcher: 'Диспетчерский отчёт' };
@@ -457,5 +753,5 @@
     $('#empty').textContent = 'Не удалось загрузить данные: ' + err.message;
   }
 
-  loadMeta().then(loadOrders).catch(showErr);
+  loadMeta().then(() => { readHash(); setView(state.view); return loadOrders(); }).catch(showErr);
 })();

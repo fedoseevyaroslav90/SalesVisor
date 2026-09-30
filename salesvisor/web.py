@@ -5,19 +5,19 @@ import hmac
 import re
 import zipfile
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from openpyxl.utils.exceptions import InvalidFileException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from sqlalchemy import delete, insert
 from sqlalchemy.engine import Engine
 
-from . import queries
+from . import export, queries
 from .config import Settings, get_settings
 from .bitrix import Bitrix, live_info
 from .db import bitrix_links, comments, make_engine
@@ -28,6 +28,8 @@ from .sync import SyncError, run_sync
 STATIC = Path(__file__).parent / "static"
 # Предел загружаемой выгрузки: CSV отчёта по отрезкам — около 70 МБ, xlsx того же отчёта — около 30 МБ
 MAX_UPLOAD_MB = 150
+# Поля отбора в строке запроса /api/orders, /api/positions, /api/export.xlsx (см. queries.Filters)
+FILTER_KEYS = ("q", "customer", "line", "stage", "due_from", "due_to", "first_from", "first_to", "shift_min", "flags")
 
 
 class CommentIn(BaseModel):
@@ -106,9 +108,41 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
                 "bitrix_deal_url": settings.bitrix_deal_url, "bitrix_ready": bool(settings.bitrix_webhook_url),
                 "metabase_ready": settings.metabase_ready, "import_dir": bool(settings.import_dir)}
 
+    def filters_of(request: Request) -> queries.Filters:
+        """Отбор из строки запроса: те же поля для заказов, позиций и выгрузки (цвет позиции — colors)."""
+        p = request.query_params
+        return queries.Filters.from_query(**{k: p.get(k, "") for k in FILTER_KEYS}, color=p.get("colors", ""))
+
     @app.get("/api/orders")
-    def api_orders(scope: str = "open", manager: str = "", dept: str = "", color: str = "", q: str = "", overdue: bool = False):
-        return queries.list_orders(engine, scope=scope, manager=manager, dept=dept, color=color, q=q, overdue_only=overdue)
+    def api_orders(request: Request, scope: str = "open", manager: str = "", dept: str = "", color: str = "",
+                   overdue: bool = False):
+        return queries.list_orders(engine, scope=scope, manager=manager, dept=dept, color=color, overdue_only=overdue,
+                                   filters=filters_of(request))
+
+    @app.get("/api/positions")
+    def api_positions(request: Request, scope: str = "open", manager: str = "", dept: str = "", sort: str = "",
+                      offset: int = 0, limit: int = 300):
+        return queries.list_positions(engine, scope=scope, manager=manager, dept=dept, filters=filters_of(request),
+                                      sort=sort, offset=max(0, offset), limit=max(1, min(limit, 1000)))
+
+    @app.get("/api/export.xlsx")
+    def api_export(request: Request, view: str = "orders", scope: str = "open", manager: str = "", dept: str = "",
+                   color: str = "", overdue: bool = False, sort: str = "", note: str = ""):
+        """Текущий отбор в Excel: view=orders (заказы, с плиткой color/overdue) или positions."""
+        f = filters_of(request)
+        if view == "positions":
+            rows = queries.list_positions(engine, scope=scope, manager=manager, dept=dept, filters=f, sort=sort,
+                                          limit=10**6)["rows"]
+        else:
+            rows = queries.list_orders(engine, scope=scope, manager=manager, dept=dept, color=color, overdue_only=overdue,
+                                       filters=f)
+            if sort:
+                rows = queries.sort_rows(rows, sort, lambda o: 0)
+        data = export.build_xlsx(rows, "orders" if view != "positions" else "positions",
+                                 (note or "SalesVisor")[:300] + f" · выгружено {len(rows)} строк")
+        name = export.file_name("orders" if view != "positions" else "positions")
+        return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": f"attachment; filename=\"salesvisor.xlsx\"; filename*=UTF-8''{quote(name)}"})
 
     @app.get("/api/orders/{order_no}")
     def api_order(order_no: str):

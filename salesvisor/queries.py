@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import desc, func, or_, select
@@ -54,9 +55,8 @@ def position_view(pos: dict, today: date) -> dict:
             "stage": pos.get("stage") or "Нет в отчёте по отрезкам"}
 
 
-def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept: str = "", color: str = "",
-                q: str = "", overdue_only: bool = False, today: date | None = None) -> list[dict]:
-    today = today or date.today()
+def _load_positions(engine: Engine, scope: str, manager: str, dept: str, today: date):
+    """Позиции под область и фильтры менеджера/отдела + счётчики комментариев, связи Битрикс24 и сообщения о качестве."""
     stmt = select(positions)
     if scope in ("open", "stale"):
         stmt = stmt.where(positions.c.closed.is_(False))
@@ -71,18 +71,164 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
             n_comments[order_no] += 1
         links = {r.order_no: r for r in conn.execute(select(bitrix_links))}
         n_quality = defaultdict(int)
-        for (order_no,) in conn.execute(select(quality_msgs.c.order_no)):
+        for order_no, pos in conn.execute(select(quality_msgs.c.order_no, quality_msgs.c.pos)):
             n_quality[order_no] += 1
-
+            n_quality[(order_no, pos)] += 1
     if scope == "open":
         rows = [r for r in rows if not r["stale"]]
     elif scope == "stale":
         rows = [r for r in rows if r["stale"]]
+    return rows, n_comments, links, n_quality
+
+
+# Группы этапов для отбора: сам этап у позиции — строка вроде «В производстве 3/5»
+STAGE_GROUPS = {"not_made": "Не произведено", "in_prod": "В производстве", "made": "Произведено", "stock": "На складе",
+                "ready": "Готово к отгрузке", "transit": "В пути", "shipped": "Отгружено", "none": "Нет в отчёте по отрезкам"}
+_STAGE_OF = {"не произведён": "not_made", "произведён": "made", "на складе": "stock", "готов к отгрузке": "ready",
+             "в пути": "transit", "отгружен": "shipped", "отфактурирован": "shipped"}
+
+
+def stage_group(stage: str | None) -> str:
+    s = (stage or "").strip().lower()
+    if s.startswith("в производстве"):
+        return "in_prod"
+    return _STAGE_OF.get(s, "none")
+
+
+def _date(v) -> date | None:
+    try:
+        return date.fromisoformat(v) if v else None
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass
+class Filters:
+    """Отбор на уровне позиции (одинаковый для заказов, позиций и выгрузки в Excel). Пустое поле — не отбирать.
+    Заказ попадает в список, если под отбор подошла хотя бы одна его позиция; считается он по подошедшим позициям."""
+    q: str = ""                   # заказ, клиент, менеджер, изделие — подстрока
+    customer: str = ""            # клиент — подстрока
+    line: str = ""                # линия (рабочее место); «-» — без линии
+    stage: str = ""               # группа этапа, см. STAGE_GROUPS; несколько — через запятую
+    color: str = ""               # red | yellow | green | none; несколько — через запятую
+    due_from: date | None = None  # срок сейчас (текущая декада светофора, иначе треб. дата) — с
+    due_to: date | None = None    # — по
+    first_from: date | None = None  # первая обещанная клиенту дата — с
+    first_to: date | None = None    # — по
+    shift_min: int | None = None  # смещение от первой даты, дней, не меньше
+    flags: frozenset = frozenset()  # overdue, quality, nolink, comments, noline, plan (есть в плане производства)
+
+    @classmethod
+    def from_query(cls, **kw) -> "Filters":
+        shift = str(kw.get("shift_min") or "").strip()
+        return cls(q=(kw.get("q") or "").strip().lower(), customer=(kw.get("customer") or "").strip().lower(),
+                   line=(kw.get("line") or "").strip(), stage=(kw.get("stage") or "").strip(),
+                   color=(kw.get("color") or "").strip(),
+                   due_from=_date(kw.get("due_from")), due_to=_date(kw.get("due_to")),
+                   first_from=_date(kw.get("first_from")), first_to=_date(kw.get("first_to")),
+                   shift_min=int(shift) if shift.lstrip("-").isdigit() else None,
+                   flags=frozenset(f for f in (kw.get("flags") or "").split(",") if f))
+
+    def match(self, p: dict) -> bool:
+        if self.q and not any(self.q in str(p.get(f) or "").lower() for f in ("order_no", "customer", "manager", "product")):
+            return False
+        if self.customer and self.customer not in str(p.get("customer") or "").lower():
+            return False
+        if self.line and (p.get("line") or "-") != self.line:
+            return False
+        if self.stage and stage_group(p.get("stage")) not in self.stage.split(","):
+            return False
+        if self.color and (p.get("color") or "none") not in self.color.split(","):
+            return False
+        due, first = _date(p.get("due_date")), _date(p.get("first_decade_end"))
+        if self.due_from and not (due and due >= self.due_from) or self.due_to and not (due and due <= self.due_to):
+            return False
+        if self.first_from and not (first and first >= self.first_from) or self.first_to and not (first and first <= self.first_to):
+            return False
+        if self.shift_min is not None and (p.get("shift_days") or 0) < self.shift_min:
+            return False
+        f = self.flags
+        return not (("overdue" in f and not p["overdue"]) or ("quality" in f and not p["quality"])
+                    or ("nolink" in f and (p["bitrix_task"] or p["bitrix_deal"])) or ("comments" in f and not p["comments"])
+                    or ("noline" in f and p.get("line")) or ("plan" in f and not p.get("line")))
+
+
+# Поля позиции для ленты «Позиции» и выгрузки — только то, что показывает и по чему отбирает интерфейс
+POSITION_FIELDS = ("order_no", "pos", "customer", "sales_dept", "manager", "product", "color", "first_decade",
+                   "first_decade_end", "current_decade", "current_decade_end", "due_date", "shift_days", "required_date",
+                   "plan_ship_date", "invoice_plan_date", "line", "plan_end_date", "plan_end_time", "stage",
+                   "segments_total", "segments_ready", "overdue", "stale", "disp_decade", "disp_ready", "length_plan",
+                   "unit", "amount_rub", "quality", "comments", "bitrix_task", "bitrix_deal")
+
+
+def _filtered_positions(engine: Engine, scope: str, manager: str, dept: str, f: Filters, today: date) -> list[dict]:
+    """Позиции под область, менеджера, отдел и отбор; у каждой — качество, комментарии и связь с Битрикс24."""
+    rows, n_comments, links, n_quality = _load_positions(engine, scope, manager, dept, today)
+    out = []
+    for p in rows:
+        link = links.get(p["order_no"])
+        p["segments_ready"] = (p.get("segments_ready") or 0) + (p.get("segments_shipped") or 0)
+        p["quality"] = n_quality.get((p["order_no"], p["pos"]), 0)
+        p["comments"] = n_comments.get(p["order_no"], 0)
+        p["bitrix_task"] = link.task_id if link is not None and link.task_id else p.get("bitrix_task")
+        p["bitrix_deal"] = link.deal_id if link is not None else None
+        if f.match(p):
+            out.append(p)
+    return out
+
+
+def _sort_key(field: str):
+    """Ключ сортировки по полю: пустые значения всегда в конце (для обоих направлений — см. sort_rows)."""
+    if field == "pos":
+        return lambda r: _pos_sort(r.get("pos"))
+    if field == "color":
+        return lambda r: COLOR_RANK.get(r.get("color"), 3)
+    if field == "ready":
+        return lambda r: (r.get("segments_ready") or 0) / r["segments_total"] if r.get("segments_total") else -1
+    return lambda r: r.get(field)
+
+
+def sort_rows(rows: list[dict], sort: str, default) -> list[dict]:
+    """sort = «поле» или «-поле» (по убыванию); пустые значения — в конце при любом направлении."""
+    field, reverse = (sort[1:], True) if sort.startswith("-") else (sort, False)
+    if not field:
+        return sorted(rows, key=default)
+    key = _sort_key(field)
+    filled = [r for r in rows if key(r) not in (None, "")]
+    empty = [r for r in rows if key(r) in (None, "")]
+    try:
+        filled.sort(key=key, reverse=reverse)
+    except TypeError:  # разнотипные значения — сравниваем как строки
+        filled.sort(key=lambda r: str(key(r)), reverse=reverse)
+    return filled + empty
+
+
+def _position_default_order(r):
+    return (0 if r["overdue"] else 1, COLOR_RANK.get(r["color"], 3), -(r["shift_days"] or 0),
+            r["due_date"] or "9999", r["order_no"], _pos_sort(r["pos"]))
+
+
+def list_positions(engine: Engine, *, scope: str = "open", manager: str = "", dept: str = "", filters: Filters | None = None,
+                   sort: str = "", offset: int = 0, limit: int = 300, today: date | None = None) -> dict:
+    """Лента позиций для отбора на уровне позиции: сервер отбирает, сортирует и отдаёт страницу (все открытые
+    позиции — десятки тысяч строк, целиком в браузер не отдаём)."""
+    today = today or date.today()
+    rows = _filtered_positions(engine, scope, manager, dept, filters or Filters(), today)
+    rows = sort_rows(rows, sort, _position_default_order)
+    page = [{f: _iso(r.get(f)) for f in POSITION_FIELDS} for r in rows[offset:offset + limit]]
+    return {"total": len(rows), "offset": offset, "rows": page}
+
+
+def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept: str = "", color: str = "",
+                q: str = "", overdue_only: bool = False, filters: Filters | None = None,
+                today: date | None = None) -> list[dict]:
+    today = today or date.today()
+    f = filters or Filters(q=q.strip().lower())
+    rows = _filtered_positions(engine, scope, manager, dept, f, today)
     by_order: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         by_order[r["order_no"]].append(r)
 
-    q = q.strip().lower()
     out = []
     for order_no, ps in by_order.items():
         first = next((p for p in ps if p.get("customer")), ps[0])
@@ -106,13 +252,14 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
             "nearest_due": min(dues) if dues else None,
             "earliest_first": min(firsts) if firsts else None,
             "segments_total": sum(p.get("segments_total") or 0 for p in ps),
-            "segments_ready": sum((p.get("segments_ready") or 0) + (p.get("segments_shipped") or 0) for p in ps),
-            "bitrix_task": _effective_task(links.get(order_no), ps),
-            "bitrix_deal": links[order_no].deal_id if order_no in links else None,
+            "segments_ready": sum(p["segments_ready"] for p in ps),
+            "bitrix_task": next((p["bitrix_task"] for p in ps if p.get("bitrix_task")), None),
+            "bitrix_deal": first.get("bitrix_deal"),
             "amount_rub": sum(p.get("amount_rub") or 0 for p in ps),
-            "comments": n_comments.get(order_no, 0),
-            "quality": n_quality.get(order_no, 0),
+            "comments": first["comments"],
+            "quality": sum(p["quality"] for p in ps),
             "lines": sorted({p["line"] for p in ps if p.get("line")}),
+            "stages": sorted({p["stage"] for p in ps if p.get("stage")}),
         }
         if color == "quality":
             if not order["quality"]:
@@ -125,9 +272,6 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
         elif color == "quality":
             pass
         elif overdue_only and not order["overdue"]:
-            continue
-        if q and not any(q in str(order.get(f) or "").lower() for f in ("order_no", "customer", "manager")) \
-                and not any(q in str(p.get("product") or "").lower() for p in ps):
             continue
         out.append(order)
 
@@ -209,11 +353,13 @@ def meta(engine: Engine) -> dict:
     with engine.connect() as conn:
         managers = sorted({r[0] for r in conn.execute(select(positions.c.manager).where(positions.c.closed.is_(False))) if r[0]})
         depts = sorted({r[0] for r in conn.execute(select(positions.c.sales_dept).where(positions.c.closed.is_(False))) if r[0]})
+        # клиенты открытых позиций — подсказки в поле «Клиент» отбора
+        customers = sorted({r[0] for r in conn.execute(select(positions.c.customer).where(positions.c.closed.is_(False))) if r[0]})
         last = {r.source: _iso(r.loaded_at) for r in conn.execute(
             select(snapshots.c.source, snapshots.c.loaded_at).order_by(snapshots.c.loaded_at))}
         lines = sorted({r[0] for r in conn.execute(select(positions.c.line).where(positions.c.line.is_not(None))) if r[0]})
         quality_total = conn.execute(select(func.count()).select_from(quality_msgs)).scalar()
-    return {"managers": managers, "depts": depts, "lines": lines, "last_load": last, "today": date.today().isoformat(),
+    return {"managers": managers, "depts": depts, "customers": customers, "lines": lines, "last_load": last, "today": date.today().isoformat(),
             "quality_total": quality_total}
 
 

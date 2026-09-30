@@ -291,3 +291,50 @@ def test_load_order_does_not_matter():
     # следующий прогон ППМ без этой позиции не стирает её линию (в ZPP только ближайший горизонт)
     load_plan(engine, plan.assign(**{"Заказ клиента": "1200000099"}), "plan2.xlsx")
     assert order_card(engine, "1200000031")["positions"][0]["line"] == "OEL60-5"
+
+
+def test_filters_sort_and_export():
+    """Отбор на уровне позиции, сортировка и страницы ленты позиций, выгрузка в Excel (30.09.2026)."""
+    import io
+    from openpyxl import load_workbook
+    from salesvisor.queries import Filters, list_orders, list_positions
+
+    engine = make_engine("sqlite:///:memory:")
+    load_segments(engine, pd.DataFrame([
+        seg_row("1200000041", "10", "1", "10 октября, 2026"),
+        seg_row("1200000041", "20", "1", "10 октября, 2026", produced="@08@"),
+        seg_row("1200000042", "10", "1", "25 октября, 2026", manager="PETROV"),
+    ]), "d1")
+    load_svetofor(engine, pd.DataFrame([
+        svet_row("1200000041", "10", "1Д10", "3Д10", "20", "red"),
+        svet_row("1200000041", "20", "1Д10", "1Д10", "0", "green"),
+        svet_row("1200000042", "10", "3Д10", "3Д10", "0", "green"),
+    ]).assign(**{"Заказчик": ["=HYPERLINK(\"x\")", "=HYPERLINK(\"x\")", "ООО Бета"]}), "d1")
+    today = date(2026, 9, 30)
+
+    # заказ попадает в список, если подошла хоть одна позиция, и считается по подошедшим
+    o = list_orders(engine, filters=Filters.from_query(stage="not_made"), today=today)
+    assert {x["order_no"]: x["positions"] for x in o} == {"1200000041": 1, "1200000042": 1}
+    assert [x["order_no"] for x in list_orders(engine, filters=Filters.from_query(shift_min="10"), today=today)] == ["1200000041"]
+    # срок сейчас — текущая декада светофора: 3Д10 = 21–31.10
+    f = Filters.from_query(due_from="2026-10-21", due_to="2026-10-31")
+    assert {(p["order_no"], p["pos"]) for p in list_positions(engine, filters=f, today=today)["rows"]} == \
+        {("1200000041", "10"), ("1200000042", "10")}
+    assert list_positions(engine, filters=Filters.from_query(customer="бета"), today=today)["total"] == 1
+    assert list_positions(engine, filters=Filters.from_query(color="red"), today=today)["total"] == 1
+    # сортировка и страницы
+    r = list_positions(engine, sort="-shift_days", limit=2, today=today)
+    assert r["total"] == 3 and len(r["rows"]) == 2 and r["rows"][0]["shift_days"] == 20
+    r = list_positions(engine, sort="due_date", offset=2, limit=2, today=today)
+    assert len(r["rows"]) == 1 and r["rows"][0]["due_date"] == "2026-10-31"
+
+    client = TestClient(create_app(engine, Settings(database_url="sqlite:///:memory:")))
+    assert client.get("/api/positions?stage=ready,none&limit=5").json()["total"] == 0
+    x = client.get("/api/export.xlsx?view=positions&sort=-shift_days&note=Проба")
+    assert x.status_code == 200 and "attachment" in x.headers["content-disposition"]
+    ws = load_workbook(io.BytesIO(x.content)).active
+    assert ws["A1"].value.startswith("Проба") and ws["A2"].value == "Заказ" and ws.max_row == 5
+    assert ws["C3"].value == '=HYPERLINK("x")' and ws["C3"].data_type == "s"  # похожее на формулу — текстом
+    assert ws["K3"].number_format == "DD.MM.YYYY"
+    x = client.get("/api/export.xlsx?view=orders&color=red")
+    assert load_workbook(io.BytesIO(x.content)).active.max_row == 3

@@ -23,36 +23,113 @@
   <main>
     <section id="tab-orders" class="tab active">
       <div class="toolbar">
+        <div class="view-switch" role="group" aria-label="Что показывать">
+          <button data-view="orders" class="on" title="Строка — заказ, итог по его позициям">Заказы</button>
+          <button data-view="positions" title="Строка — позиция: изделие, линия, этап, сроки">Позиции</button>
+        </div>
         <label>Менеджер <select id="manager"><option value="">Все</option></select></label>
         <label>Отдел <select id="dept"><option value="">Все</option></select></label>
-        <input id="search" type="search" placeholder="Заказ, клиент, изделие">
+        <input id="search" type="search" placeholder="Заказ, клиент, менеджер, изделие">
         <label>Показать <select id="scope">
           <option value="open">В работе</option>
           <option value="stale">Хвосты: срок прошёл больше полугода назад</option>
           <option value="all">Все, включая отгруженные</option>
         </select></label>
+        <button class="btn secondary" id="filtersToggle" aria-expanded="true">Отбор <b id="filtersCount" hidden></b></button>
+        <span class="toolbar-end">
+          <button class="btn secondary" id="copyLink" title="Скопировать ссылку на этот отбор — коллега с доступом откроет то же самое">Ссылка на отбор</button>
+          <button class="btn" id="exportBtn" title="Все строки текущего отбора в том же порядке, с фильтрами в шапке">Скачать в Excel</button>
+        </span>
+      </div>
+      <div class="filters" id="filters">
+        <label>Клиент <input id="fCustomer" list="customerList" placeholder="часть названия" autocomplete="off"></label>
+        <datalist id="customerList"></datalist>
+        <label>Линия <select id="fLine"><option value="">Все</option><option value="-">Не в плане производства</option></select></label>
+        <label>Этап <select id="fStage">
+          <option value="">Любой</option>
+          <option value="not_made,in_prod">Не произведено (включая «в производстве»)</option>
+          <option value="not_made">Не произведено</option>
+          <option value="in_prod">В производстве</option>
+          <option value="made,stock">Произведено, на складе</option>
+          <option value="ready">Готово к отгрузке</option>
+          <option value="transit">В пути</option>
+          <option value="shipped">Отгружено</option>
+          <option value="none">Нет в отчёте по отрезкам</option>
+        </select></label>
+        <label title="Текущая декада светофора, а если её нет — требуемая дата поставки">Срок сейчас <select id="fDue" data-period="due">
+          <option value="">Любой</option>
+          <option value="past">Прошёл</option>
+          <option value="dec">Эта декада</option>
+          <option value="nextdec">Следующая декада</option>
+          <option value="month">Этот месяц</option>
+          <option value="nextmonth">Следующий месяц</option>
+          <option value="custom">Период…</option>
+        </select></label>
+        <span class="period" id="fDuePeriod" hidden><input type="date" id="fDueFrom" aria-label="Срок с"> — <input type="date" id="fDueTo" aria-label="Срок по"></span>
+        <label title="Первая обещанная клиенту дата (конец первой декады светофора)">Первая дата клиента <select id="fFirst" data-period="first">
+          <option value="">Любая</option>
+          <option value="prevmonth">Прошлый месяц</option>
+          <option value="month">Этот месяц</option>
+          <option value="nextmonth">Следующий месяц</option>
+          <option value="custom">Период…</option>
+        </select></label>
+        <span class="period" id="fFirstPeriod" hidden><input type="date" id="fFirstFrom" aria-label="Первая дата с"> — <input type="date" id="fFirstTo" aria-label="Первая дата по"></span>
+        <label>Смещение от <input id="fShift" type="number" min="0" step="10" placeholder="0"> дн.</label>
+        <span class="flags-group">
+          <label class="check"><input type="checkbox" data-flag="overdue"> просрочено</label>
+          <label class="check"><input type="checkbox" data-flag="quality"> несоответствия</label>
+          <label class="check"><input type="checkbox" data-flag="nolink"> без Битрикс24</label>
+          <label class="check"><input type="checkbox" data-flag="comments"> с комментариями</label>
+          <label class="check"><input type="checkbox" data-flag="plan"> в плане производства</label>
+        </span>
+        <button class="linkish-btn" id="fReset">Сбросить отбор</button>
       </div>
       <div class="tiles" id="tiles"></div>
-      <div class="table-wrap">
+      <p class="meta-line" id="found"></p>
+      <div class="table-wrap" id="ordersWrap">
         <table id="orders">
           <thead>
             <tr>
-              <th></th>
-              <th>Заказ</th>
-              <th>Клиент</th>
-              <th>Отдел / менеджер</th>
-              <th title="Позиции по цветам светофора">Позиции</th>
-              <th title="Первая требуемая дата клиента">Первая декада</th>
-              <th title="Где заказ сейчас">Текущая декада</th>
-              <th title="Наибольшее смещение по позициям">Смещение</th>
-              <th title="Готово к отгрузке и отгружено отрезков">Отрезки</th>
-              <th>Битрикс</th>
+              <th data-sort="color" title="Худший цвет светофора по позициям"></th>
+              <th data-sort="order_no">Заказ</th>
+              <th data-sort="customer">Клиент</th>
+              <th data-sort="manager">Отдел / менеджер</th>
+              <th data-sort="positions" title="Позиции по цветам светофора">Позиции</th>
+              <th data-sort="earliest_first" title="Первая требуемая дата клиента">Первая декада</th>
+              <th data-sort="nearest_due" title="Где заказ сейчас (ближайший срок)">Текущая декада</th>
+              <th data-sort="max_shift" title="Наибольшее смещение по позициям">Смещение</th>
+              <th data-sort="ready" title="Готово к отгрузке и отгружено отрезков">Отрезки</th>
+              <th data-sort="bitrix_task">Битрикс</th>
             </tr>
           </thead>
           <tbody></tbody>
         </table>
         <p class="empty" id="empty" hidden></p>
-        <p class="meta-line" id="shown" style="padding:8px 12px"></p>
+        <div class="more" id="ordersMore" hidden><button class="btn secondary">Показать ещё</button></div>
+      </div>
+      <div class="table-wrap" id="positionsWrap" hidden>
+        <table id="positions">
+          <thead>
+            <tr>
+              <th data-sort="color"></th>
+              <th data-sort="order_no">Заказ / поз.</th>
+              <th data-sort="customer">Клиент</th>
+              <th data-sort="product">Изделие</th>
+              <th data-sort="manager">Менеджер</th>
+              <th data-sort="first_decade_end" title="Первая требуемая дата клиента">Первая декада</th>
+              <th data-sort="due_date" title="Текущая декада светофора, иначе треб. дата">Срок сейчас</th>
+              <th data-sort="shift_days">Смещ., дн.</th>
+              <th data-sort="plan_ship_date">План отгрузки</th>
+              <th data-sort="plan_end_date" title="План производства: линия и плановое окончание">Линия, окончание</th>
+              <th data-sort="stage">Этап</th>
+              <th data-sort="ready" title="Готово к отгрузке и отгружено отрезков">Отрезки</th>
+              <th data-sort="quality">Отметки</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p class="empty" id="posEmpty" hidden></p>
+        <div class="more" id="positionsMore" hidden><button class="btn secondary">Показать ещё</button></div>
       </div>
     </section>
 
@@ -66,13 +143,15 @@
           <option value="ship">Только отгрузку</option>
         </select></label>
         <label class="check"><input id="dayBacklog" type="checkbox"> и невыполненное за прошлые дни</label>
+        <input id="daySearch" type="search" placeholder="Заказ, клиент, изделие">
+        <span class="toolbar-end"><button class="btn secondary" id="dayExport" title="Строки на экране — в CSV для Excel">Скачать</button></span>
       </div>
       <p class="meta-line" id="dayNote"></p>
       <div class="tiles" id="dayTiles"></div>
       <div class="line-strip" id="dayLines"></div>
       <div class="table-wrap">
         <table id="dayTable">
-          <thead><tr><th>Окончание</th><th>Заказ / поз.</th><th>Клиент</th><th>Изделие</th><th>Менеджер</th><th>План отгрузки</th><th>Этап</th><th>Выполнение</th></tr></thead>
+          <thead><tr><th data-sort="plan_end">Окончание</th><th data-sort="order_no">Заказ / поз.</th><th data-sort="customer">Клиент</th><th data-sort="product">Изделие</th><th data-sort="manager">Менеджер</th><th data-sort="ship_plan">План отгрузки</th><th data-sort="stage">Этап</th><th data-sort="state">Выполнение</th></tr></thead>
           <tbody></tbody>
         </table>
         <p class="empty" id="dayEmpty" hidden></p>
@@ -99,10 +178,12 @@
           <option value="todo">Не готовые</option>
           <option value="mismatch">Расхождения с отчётом по отрезкам</option>
         </select></label>
+        <input id="dispSearch" type="search" placeholder="Заказ, клиент, изделие, менеджер">
+        <span class="toolbar-end"><button class="btn secondary" id="dispExport" title="Позиции декады на экране — в CSV для Excel">Скачать</button></span>
       </div>
       <div class="table-wrap" id="dispDetailWrap" hidden>
         <table id="dispDetail">
-          <thead><tr><th>Заказ / поз.</th><th>Клиент</th><th>Изделие</th><th>Менеджер</th><th>ГП, км</th><th>МЗ, тыс. ₽</th><th>Партия назначена</th><th>Этап по отрезкам</th><th>Сверка</th></tr></thead>
+          <thead><tr><th data-sort="order_no">Заказ / поз.</th><th data-sort="customer">Клиент</th><th data-sort="product">Изделие</th><th data-sort="manager">Менеджер</th><th data-sort="km">ГП, км</th><th data-sort="mz">МЗ, тыс. ₽</th><th data-sort="ready_share">Партия назначена</th><th data-sort="stage">Этап по отрезкам</th><th data-sort="mismatch">Сверка</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -112,10 +193,12 @@
       <div class="toolbar">
         <label>За <select id="days"><option value="1">1 день</option><option value="7" selected>7 дней</option><option value="30">30 дней</option></select></label>
         <label>Что <select id="field"><option value="">Всё</option><option value="current_decade">Текущая декада</option><option value="required_date">Треб. дата</option><option value="color">Цвет</option><option value="stage">Этап</option><option value="line">Линия</option><option value="plan_end_date">План. окончание</option><option value="disp_decade">Признак декады</option><option value="quality">Несоответствия</option></select></label>
+        <input id="changesSearch" type="search" placeholder="Заказ, клиент, менеджер, значение">
+        <span class="toolbar-end"><button class="btn secondary" id="changesExport" title="Строки на экране — в CSV для Excel">Скачать</button></span>
       </div>
       <div class="table-wrap">
         <table class="changes" id="changes">
-          <thead><tr><th>Когда</th><th>Заказ</th><th>Поз.</th><th>Клиент</th><th>Менеджер</th><th>Что</th><th>Было</th><th>Стало</th></tr></thead>
+          <thead><tr><th data-sort="at">Когда</th><th data-sort="order_no">Заказ</th><th data-sort="pos">Поз.</th><th data-sort="customer">Клиент</th><th data-sort="manager">Менеджер</th><th data-sort="field_name">Что</th><th data-sort="old">Было</th><th data-sort="new">Стало</th></tr></thead>
           <tbody></tbody>
         </table>
         <p class="empty" id="changesEmpty" hidden>За этот период изменений нет.</p>
