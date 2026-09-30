@@ -23,6 +23,8 @@ FIELD_NAMES = {
     "disp_decade": "Декада в диспетчерском",
     "disp_ready": "Готовность в диспетчерском",
     "quality": "Несоответствие по качеству",
+    "reject_code": "Причина отклонения (Z)",
+    "new_position": "Новая позиция",
 }
 
 
@@ -57,8 +59,11 @@ def position_view(pos: dict, today: date) -> dict:
     first = pos.get("first_decade_end")
     first_d = date.fromisoformat(first) if isinstance(first, str) else first
     late = max(((max(due_d, today) if due_d else today) - first_d).days, 0) if first_d and not pos.get("closed") else 0
+    # регламент причин отклонения: Z6 (прогноз) не должно оставаться, когда декада срока уже началась
+    z6_late = ((pos.get("reject_code") or "").upper() == "Z6" and not pos.get("closed") and bool(due_d)
+               and due_d.replace(day=1 if due_d.day <= 10 else 11 if due_d.day <= 20 else 21) <= today)
     return {**{k: _iso(v) for k, v in pos.items()}, "due_date": _iso(due_d), "overdue": overdue, "stale": stale,
-            "stage": pos.get("stage") or "Нет в отчёте по отрезкам", "days_late": late,
+            "stage": pos.get("stage") or "Нет в отчёте по отрезкам", "days_late": late, "z6_late": z6_late,
             "priority": round((pos.get("mp_rub") or 0) * late)}
 
 
@@ -188,6 +193,8 @@ class Filters:
                     or ("nolink" in f and (p["bitrix_task"] or p["bitrix_deal"])) or ("comments" in f and not p["comments"])
                     or ("noline" in f and p.get("line")) or ("plan" in f and not p.get("line"))
                     or ("goz" in f and not _GOZ.match(p.get("product") or ""))
+                    or ("z6late" in f and not p.get("z6_late"))
+                    or ("late30" in f and not p.get("days_late", 0) > 30)
                     or ("noinkab" in f and _INKAB.match(p.get("customer") or "")))
 
 
@@ -431,6 +438,20 @@ def _shipped(p: dict) -> bool:
     return bool(p.get("closed")) or bool(total) and (p.get("segments_shipped") or 0) >= total
 
 
+# Производственные сутки — с 08:00 до 08:00: окончание до 08:00 относится к предыдущим суткам
+# (правило из анализа сдвижек и отчёта Правлению, 06.2026)
+SHIFT_START = "08:00"
+
+
+def prod_day(end_date: str | None, end_time: str | None) -> str | None:
+    """Производственные сутки окончания: «02.10 05:40» → 01.10; «02.10 08:00» и позже → 02.10."""
+    if not end_date:
+        return None
+    if end_time and end_time < SHIFT_START:
+        return (date.fromisoformat(end_date) - timedelta(days=1)).isoformat()
+    return end_date
+
+
 def day_plan(engine: Engine, day: date, *, manager: str = "", dept: str = "", line: str = "",
              with_backlog: bool = False, today: date | None = None) -> dict:
     """Что по плану должно случиться в этот день: окончание производства (план производства, линия)
@@ -439,10 +460,12 @@ def day_plan(engine: Engine, day: date, *, manager: str = "", dept: str = "", li
     today = today or date.today()
     ship_col = positions.c.plan_ship_date
     inv_col = positions.c.invoice_plan_date
+    # окончание до 08:00 следующего дня — ещё эти производственные сутки
+    next_day = day + timedelta(days=1)
     if with_backlog:
-        cond = or_(positions.c.plan_end_date <= day, ship_col <= day, (ship_col.is_(None)) & (inv_col <= day))
+        cond = or_(positions.c.plan_end_date <= next_day, ship_col <= day, (ship_col.is_(None)) & (inv_col <= day))
     else:
-        cond = or_(positions.c.plan_end_date == day, ship_col == day, (ship_col.is_(None)) & (inv_col == day))
+        cond = or_(positions.c.plan_end_date.in_([day, next_day]), ship_col == day, (ship_col.is_(None)) & (inv_col == day))
     stmt = select(positions).where(cond)
     if vals(manager):
         stmt = stmt.where(_in(positions.c.manager, manager))
@@ -459,20 +482,20 @@ def day_plan(engine: Engine, day: date, *, manager: str = "", dept: str = "", li
     for r in rows:
         r["quality"] = qmap.get((r["order_no"], r["pos"]), [])
         ship_plan = r.get("plan_ship_date") or r.get("invoice_plan_date")
-        make = bool(r.get("plan_end_date")) and (r["plan_end_date"] <= day.isoformat() if with_backlog
-                                                 else r["plan_end_date"] == day.isoformat())
+        r["prod_day"] = pday = prod_day(r.get("plan_end_date"), r.get("plan_end_time"))
+        make = bool(pday) and (pday <= day.isoformat() if with_backlog else pday == day.isoformat())
         ship = bool(ship_plan) and (ship_plan <= day.isoformat() if with_backlog else ship_plan == day.isoformat())
         make_done, ship_done = _produced(r), _shipped(r)
         if with_backlog:
             # Из прошлых дней берём только невыполненное; сам день показываем целиком
-            make = make and (r["plan_end_date"] == day.isoformat() or not make_done)
+            make = make and (pday == day.isoformat() or not make_done)
             ship = ship and (ship_plan == day.isoformat() or not ship_done)
         if not (make or ship):
             continue
         risk = bool(r.get("plan_end_date") and ship_plan and r["plan_end_date"] > ship_plan and not ship_done and not make_done)
         out.append({**r, "ship_plan": ship_plan, "task_make": make, "task_ship": ship, "risk": risk,
                     "make_done": make_done, "ship_done": ship_done,
-                    "late": (make and not make_done and r["plan_end_date"] < day.isoformat())
+                    "late": (make and not make_done and pday < day.isoformat())
                             or (ship and not ship_done and ship_plan < day.isoformat())})
     out.sort(key=lambda r: (r.get("line") or "яяя", r.get("plan_end_date") or "", r.get("plan_end_time") or "",
                             r["order_no"], _pos_sort(r["pos"])))

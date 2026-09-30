@@ -406,6 +406,41 @@
     render();
   });
 
+  // ---------- столбцы: какие показывать (у каждого сотрудника свои, в преднастройках) ----------
+  const colStyle = document.head.appendChild(document.createElement('style'));
+  const COL_TABLES = [['orders', '#orders'], ['positions', '#positions']];
+  const colName = th => th.textContent.trim() || (th.dataset.sort === 'color' ? 'Цвет светофора' : th.dataset.sort);
+  function applyCols() {
+    const hidden = state.prefs?.hidden_cols || {};
+    let css = '';
+    for (const [view, sel] of COL_TABLES) {
+      const ths = [...document.querySelectorAll(`${sel} > thead > tr > th`)];
+      for (const key of hidden[view] || []) {
+        const i = ths.findIndex(th => th.dataset.sort === key) + 1;
+        // строки с позициями под заказом (sub-row) не трогаем — у них свои столбцы
+        if (i > 0) css += `${sel} > thead > tr > th:nth-child(${i}), ${sel} > tbody > tr:not(.sub-row) > td:nth-child(${i}) { display: none; }
+`;
+      }
+    }
+    colStyle.textContent = css;
+    $('#colsBtn').textContent = (hidden[state.view] || []).length ? `Столбцы (скрыто ${(hidden[state.view] || []).length})` : 'Столбцы';
+  }
+  function drawCols() {
+    const sel = state.view === 'orders' ? '#orders' : '#positions';
+    const hidden = new Set((state.prefs?.hidden_cols || {})[state.view] || []);
+    $('#colsList').innerHTML = [...document.querySelectorAll(`${sel} > thead > tr > th[data-sort]`)]
+      .filter(th => th.dataset.sort !== 'order_no')  // номер заказа виден всегда
+      .map(th => `<label class="check"><input type="checkbox" value="${esc(th.dataset.sort)}"${hidden.has(th.dataset.sort) ? '' : ' checked'}> ${esc(colName(th))}</label>`).join('');
+  }
+  function setHidden(list) {
+    savePrefs({ hidden_cols: { ...(state.prefs?.hidden_cols || {}), [state.view]: list } });
+    applyCols();
+  }
+  $('#colsBtn').addEventListener('click', () => { const open = $('#colsPop').hidden; $('#colsPop').hidden = !open; if (open) drawCols(); });
+  $('#colsList').addEventListener('change', () => setHidden([...document.querySelectorAll('#colsList input')].filter(i => !i.checked).map(i => i.value)));
+  $('#colsAll').addEventListener('click', () => { setHidden([]); drawCols(); });
+  document.addEventListener('click', e => { if (!e.target.closest('.cols')) $('#colsPop').hidden = true; });
+
   function renderPositions() {
     const rows = state.positions;
     $('#found').textContent = `Под отбор: ${state.posTotal} позиций` + (state.posTotal > rows.length ? `, показаны ${rows.length}` : '') + '.';
@@ -440,6 +475,7 @@
     $('#positionsWrap').hidden = v === 'orders';
     $('#tiles').hidden = v !== 'orders';
     $('#expandAll').hidden = v !== 'orders';
+    applyCols();
   }
   document.querySelectorAll('.view-switch button').forEach(b => b.addEventListener('click', () => {
     if (b.dataset.view === state.view) return;
@@ -505,6 +541,7 @@
     }
     fillSavedViews();
     fillMe();
+    applyCols();
   }
   const savedViews = () => (state.prefs ? state.prefs.views || [] : []);
   function fillSavedViews() {
@@ -652,6 +689,10 @@
       <h2>Заказ ${esc(no)}</h2>
       <div class="muted">${esc(p0.customer || '')} · ${esc(p0.sales_dept || '')} · менеджер ${esc(p0.manager || '—')}${p0.bitrix_raw ? ' · Битрикс: ' + esc(p0.bitrix_raw) : ''}</div>
 
+      ${(() => {  // СТП 02-2-01: больше 30 дней опоздания — покупатель вправе отказаться от поставки
+        const late = Math.max(0, ...d.positions.map(p => p.days_late || 0));
+        return late > 30 ? `<div class="warn-box">Опоздание к первой дате клиента — до ${late} дн. Больше 30 дней: по СТП 02-2-01 покупатель вправе отказаться от поставки.</div>` : '';
+      })()}
       <h3>Битрикс24</h3>
       <div id="bxBox">
         <div>${d.bitrix.task_id || d.bitrix.deal_id ? [bxLink('task', d.bitrix.task_id), bxLink('deal', d.bitrix.deal_id)].filter(Boolean).join(' · ') : '<span class="late-tag">Заказ не связан с Битрикс24</span>'}
@@ -769,7 +810,7 @@
     const d = state.day, what = $('#dayWhat').value, lineSel = $('#dayLine').value || state.dayLine;
     const s = d.summary;
     const hasPlan = (state.meta.lines || []).length > 0;
-    $('#dayNote').textContent = (hasPlan ? 'Произвести — по ZPP context (линия, плановое окончание); сделано, если все отрезки произведены или факт MES дошёл до плана. Отгрузить — по плану отгрузки. '
+    $('#dayNote').textContent = (hasPlan ? 'Произвести — по ZPP context (линия, плановое окончание); сделано, если все отрезки произведены или факт MES дошёл до плана. Производственные сутки — с 08:00 до 08:00: окончание до 08:00 относится к предыдущим суткам. Отгрузить — по плану отгрузки. '
       : 'План производства ещё не загружен: линии и плановое окончание появятся после загрузки ZPP context. Пока показан план отгрузки. ')
       + `Для менеджера и отдела действуют фильтры с вкладки «Заказы».`;
     const tiles = [
@@ -802,7 +843,7 @@
       const head = !state.daySort && r.line !== prev && hasPlan ? `<tr class="line-head"><td colspan="8">${esc(r.line || 'Линия не указана')}</td></tr>` : '';
       prev = r.line;
       return head + `<tr data-no="${esc(r.order_no)}">
-        <td>${r.plan_end_date ? fmt(r.plan_end_date) + ' ' + esc(r.plan_end_time || '') : '—'}</td>
+        <td>${r.plan_end_date ? fmt(r.plan_end_date) + ' ' + esc(r.plan_end_time || '') : '—'}${r.prod_day && r.prod_day !== r.plan_end_date ? `<div class="sub" title="Окончание до 08:00 — предыдущие производственные сутки">сутки ${fmt(r.prod_day)}</div>` : ''}</td>
         <td><b>${esc(r.order_no)}</b> / ${esc(r.pos)}</td>
         <td>${esc(r.customer || '—')}</td>
         <td>${esc(r.product || '')}</td>

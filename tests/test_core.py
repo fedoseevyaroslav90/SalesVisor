@@ -388,7 +388,10 @@ def test_user_prefs_per_portal_user():
     client = TestClient(create_app(engine, Settings(database_url="sqlite:///:memory:", portal_token="s3cret")))
     ivan = {"X-SalesVisor-Token": "s3cret", "X-SalesVisor-User": "user-ivanova"}
     petr = {"X-SalesVisor-Token": "s3cret", "X-SalesVisor-User": "user-petrov"}
-    assert client.get("/api/prefs", headers=ivan).json() == {"alias": "user-ivanova", "views": [], "last": "", "sap_login": ""}
+    assert client.get("/api/prefs", headers=ivan).json() == {"alias": "user-ivanova", "views": [], "last": "", "sap_login": "",
+                                                               "hidden_cols": {}}
+    assert client.put("/api/prefs", headers=ivan, json={"hidden_cols": {"orders": ["bitrix_task"]}}).status_code == 200
+    assert client.get("/api/prefs", headers=ivan).json()["hidden_cols"] == {"orders": ["bitrix_task"]}
     assert client.put("/api/prefs", headers=ivan, json={"views": [{"name": "Мои просрочки", "query": "flags=overdue"}],
                                                          "sap_login": "IVANOVA"}).status_code == 200
     assert client.put("/api/prefs", headers=ivan, json={"last": "line=OEL60-5"}).status_code == 200  # остальное не трогает
@@ -447,3 +450,41 @@ def test_stats_otd_by_first_date():
     assert next(m for m in s["by_month"] if m["month"] == "2026-11")["в работе"] == 1
     assert {d["bucket"]: d["positions"] for d in s["depth"]}["11–30 дн."] == 1  # срок 10.09, сегодня 30.09 — 20 дней
     assert s["top_customers"][0]["customer"] in ("ООО Альфа", "ООО Бета") and s["top_customers"][0]["bad"] >= 1
+
+
+def test_production_day_starts_at_8():
+    """Производственные сутки 08:00→08:00: окончание 03.10 в 05:40 — это сутки 02.10."""
+    from salesvisor.ingest import load_plan
+    from salesvisor.queries import day_plan, prod_day
+
+    assert prod_day("2026-10-03", "05:40") == "2026-10-02" and prod_day("2026-10-03", "08:00") == "2026-10-03"
+    engine = make_engine("sqlite:///:memory:")
+    load_segments(engine, pd.DataFrame([seg_row("1200000091", "10", "1", "10 октября, 2026"),
+                                        seg_row("1200000091", "20", "1", "10 октября, 2026")]), "d1")
+    load_plan(engine, pd.DataFrame([
+        {"Заказ клиента": "1200000091", "Позиция заказа": "10", "Рабочее место": "SZ-2", "Дата конца": "03.10.2026", "Время конца": "05:40", "Номер ДСЕ": "A"},
+        {"Заказ клиента": "1200000091", "Позиция заказа": "20", "Рабочее место": "SZ-2", "Дата конца": "03.10.2026", "Время конца": "09:15", "Номер ДСЕ": "B"},
+    ]), "plan.xlsx")
+    today = date(2026, 10, 1)
+    assert [r["pos"] for r in day_plan(engine, date(2026, 10, 2), today=today)["positions"] if r["task_make"]] == ["10"]
+    assert [r["pos"] for r in day_plan(engine, date(2026, 10, 3), today=today)["positions"] if r["task_make"]] == ["20"]
+
+
+def test_feed_events_z6_control_and_late30():
+    """Лента: новая позиция и смена причины (Z6 → пусто = принят в производство); отметки Z6 и опоздание > 30 дней."""
+    from salesvisor.queries import Filters, list_positions, recent_changes
+
+    engine = make_engine("sqlite:///:memory:")
+    r1 = seg_row("1200000101", "10", "1", "10 сентября, 2026")
+    r1.update({"Причина отклонения": "Z6", "Описание Причины отклонения": "Прогноз"})
+    load_segments(engine, pd.DataFrame([r1]), "d1")
+    load_svetofor(engine, pd.DataFrame([svet_row("1200000101", "10", "1Д08", "1Д09", "30", "red")]), "d1")
+    today = date(2026, 9, 30)
+    flags = lambda f: [p["order_no"] for p in list_positions(engine, filters=Filters.from_query(flags=f), today=today)["rows"]]
+    assert flags("z6late") == ["1200000101"]       # декада срока (1Д09) уже началась, а позиция всё ещё Z6
+    assert flags("late30") == ["1200000101"]       # первая дата 10.08, сегодня 30.09 — 51 день
+    r1 = dict(r1, **{"Причина отклонения": None, "Описание Причины отклонения": None})
+    load_segments(engine, pd.DataFrame([r1, seg_row("1200000102", "10", "1", "10 октября, 2026")]), "d2")
+    ev = {(c["order_no"], c["field"]): c for c in recent_changes(engine, days=1)}
+    assert ev[("1200000101", "reject_code")]["old"] == "Z6" and ev[("1200000101", "reject_code")]["new"] == "(пусто)"
+    assert ("1200000102", "new_position") in ev

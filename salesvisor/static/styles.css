@@ -288,3 +288,8 @@ table.mini.sub td:nth-child(3) { min-width: 180px; }
 .dist i { display: block; height: 100%; }
 #statsMonths td:last-child { text-align: left; }
 @media (max-width: 1280px) { .dist { width: 90px; } }
+
+/* ---- столбцы (30.09.2026) ---- */
+.found-bar .cols { position: relative; margin-left: auto; }
+.cols-pop { right: 0; left: auto; min-width: 240px; }
+.warn-box { margin: 10px 0 0; padding: 8px 12px; border-radius: 6px; background: var(--overdue-bg); color: var(--overdue); font-size: 13px; }

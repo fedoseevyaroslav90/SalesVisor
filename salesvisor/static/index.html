@@ -84,12 +84,17 @@
           <label class="check"><input type="checkbox" data-flag="plan"> в плане производства</label>
           <label class="check" title="Изделие начинается с ГОЗ, ВПК или TEA — как в аналитике продаж"><input type="checkbox" data-flag="goz"> ГОЗ / ВПК</label>
           <label class="check" title="Скрыть заказы, где клиент — ООО «Инкаб» (Дальний Восток и другие юрлица остаются)"><input type="checkbox" data-flag="noinkab"> без внутренних ООО «Инкаб»</label>
+          <label class="check" title="Регламент причин отклонения: Z6 (прогноз, ожидание аванса) не должно оставаться к крайней дате приёма в декаду. Здесь — позиции Z6, у которых декада срока уже началась"><input type="checkbox" data-flag="z6late"> Z6 в начавшейся декаде</label>
+          <label class="check" title="Опоздание к первой дате клиента больше 30 дней: по СТП 02-2-01 покупатель вправе отказаться от поставки"><input type="checkbox" data-flag="late30"> опоздание больше 30 дн.</label>
         </span>
         <button class="linkish-btn" id="fReset">Сбросить отбор</button>
       </div>
       <div class="tiles" id="tiles"></div>
       <div class="found-bar"><p class="meta-line" id="found"></p>
-        <button class="linkish-btn" id="expandAll" title="Показать позиции у всех заказов на экране">Развернуть все</button></div>
+        <button class="linkish-btn" id="expandAll" title="Показать позиции у всех заказов на экране">Развернуть все</button>
+        <span class="cols"><button class="linkish-btn" id="colsBtn" title="Какие столбцы показывать — запоминается за вашей учётной записью">Столбцы</button>
+          <div class="ms-pop cols-pop" id="colsPop" hidden><div class="ms-list" id="colsList"></div>
+            <div class="ms-acts"><button type="button" class="linkish-btn" id="colsAll">Показать все</button></div></div></span></div>
       <div class="table-wrap" id="ordersWrap">
         <table id="orders">
           <thead>
@@ -195,8 +200,8 @@
 
     <section id="tab-changes" class="tab">
       <div class="toolbar">
-        <label>За <select id="days"><option value="1">1 день</option><option value="7" selected>7 дней</option><option value="30">30 дней</option></select></label>
-        <label>Что <select id="field"><option value="">Всё</option><option value="current_decade">Текущая декада</option><option value="required_date">Треб. дата</option><option value="color">Цвет</option><option value="stage">Этап</option><option value="line">Линия</option><option value="plan_end_date">План. окончание</option><option value="disp_decade">Признак декады</option><option value="quality">Несоответствия</option></select></label>
+        <label>За <select id="days"><option value="1">1 день</option><option value="7" selected>7 дней</option><option value="15">15 дней</option><option value="30">30 дней</option></select></label>
+        <label>Что <select id="field"><option value="">Всё</option><option value="current_decade">Текущая декада</option><option value="required_date">Треб. дата</option><option value="color">Цвет</option><option value="stage">Этап</option><option value="line">Линия</option><option value="plan_end_date">План. окончание</option><option value="disp_decade">Признак декады</option><option value="quality">Несоответствия</option><option value="reject_code">Причина отклонения (Z)</option><option value="new_position">Новые позиции</option></select></label>
         <input id="changesSearch" type="search" placeholder="Заказ, клиент, менеджер, значение">
         <span class="toolbar-end"><button class="btn secondary" id="changesExport" title="Строки на экране — в CSV для Excel">Скачать</button></span>
       </div>

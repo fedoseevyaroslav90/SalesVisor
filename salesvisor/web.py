@@ -56,6 +56,7 @@ class PrefsIn(BaseModel):
     views: list[SavedView] | None = Field(default=None, max_length=30)   # «Мои отборы»
     last: str | None = Field(default=None, max_length=2000)             # последний отбор (строка адреса)
     sap_login: str | None = Field(default=None, max_length=50)          # свой логин SAP («Создал») — «Мои заказы»
+    hidden_cols: dict[str, list[str]] | None = Field(default=None, max_length=4)  # скрытые столбцы таблиц: {"orders": [...]}
 
 
 def _id_or_none(v: str) -> str | None:
@@ -134,7 +135,8 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
         """Преднастройки того, кто открыл раздел (у каждого сотрудника портала — свои)."""
         alias = alias_of(request)
         p = prefs_of(alias)
-        return {"alias": alias, "views": p.get("views", []), "last": p.get("last", ""), "sap_login": p.get("sap_login", "")}
+        return {"alias": alias, "views": p.get("views", []), "last": p.get("last", ""), "sap_login": p.get("sap_login", ""),
+                "hidden_cols": p.get("hidden_cols", {})}
 
     @app.put("/api/prefs")
     def api_prefs_put(body: PrefsIn, request: Request):
@@ -142,6 +144,8 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
         p = prefs_of(alias)
         for k, v in body.model_dump(exclude_none=True).items():
             p[k] = v
+        if "hidden_cols" in p:  # только короткие имена столбцов, не больше 30 на таблицу
+            p["hidden_cols"] = {t[:20]: [c[:30] for c in cols[:30]] for t, cols in p["hidden_cols"].items()}
         data = json.dumps(p, ensure_ascii=False)
         person = user_of(request)[:200]
         with engine.begin() as conn:

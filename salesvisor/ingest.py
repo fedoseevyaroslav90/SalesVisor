@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import date, datetime
 
 import pandas as pd
-from sqlalchemy import Table, bindparam, delete, insert, select, text, update
+from sqlalchemy import Table, bindparam, delete, func, insert, select, text, update
 from sqlalchemy.engine import Engine
 
 from . import parsing as p
@@ -26,7 +26,9 @@ DISPATCHER_SIGNATURE = {"заказ клиента", "позиция заказ�
 
 # Какие поля позиции отслеживаем между выгрузками
 TRACKED_SVETOFOR = ["current_decade", "color", "plan_ship_date"]
-TRACKED_SEGMENTS = ["required_date", "stage"]
+TRACKED_SEGMENTS = ["required_date", "stage", "reject_code"]
+# Поля, у которых пустое значение — тоже событие: причина отклонения снята = заказ принят в производство
+TRACKED_EMPTY_MEANS = {"reject_code": "(пусто)"}
 TRACKED_PLAN = ["line", "plan_end_date"]
 TRACKED_DISPATCHER = ["disp_decade", "disp_ready"]
 
@@ -449,9 +451,11 @@ def _load_existing(conn, keys: set[tuple[str, str]], fields: list[str]) -> dict:
     return out
 
 
-def _upsert(conn, rows: list[dict], tracked: list[str], snapshot_id: int) -> dict:
+def _upsert(conn, rows: list[dict], tracked: list[str], snapshot_id: int, log_new: bool = False) -> dict:
+    """log_new — записать в журнал появление новых позиций (отрезки и светофор; не при самой первой загрузке)."""
     rows = _fit(positions, [dict(r) for r in rows])
     keys = {(r["order_no"], r["pos"]) for r in rows}
+    log_new = log_new and conn.execute(select(func.count()).select_from(positions)).scalar() > 0
     existing = _load_existing(conn, keys, tracked)
     now = datetime.now()
     to_insert, to_update, changes = [], [], []
@@ -460,12 +464,18 @@ def _upsert(conn, rows: list[dict], tracked: list[str], snapshot_id: int) -> dic
         r = {**r, "updated_at": now}
         if k not in existing:
             to_insert.append({**r, "first_seen_at": now})
+            if log_new:
+                changes.append({"order_no": k[0], "pos": k[1], "field": "new_position", "old": None,
+                                "new": (r.get("product") or "новая позиция")[:100], "snapshot_id": snapshot_id, "at": now})
             continue
         old = existing[k]
         for f in tracked:
-            if f in r and r[f] is not None and old.get(f) != r[f] and old.get(f) is not None:
-                changes.append({"order_no": k[0], "pos": k[1], "field": f, "old": _fmt(old[f]),
-                                "new": _fmt(r[f]), "snapshot_id": snapshot_id, "at": now})
+            if f not in r or old.get(f) == r[f]:
+                continue
+            empty = TRACKED_EMPTY_MEANS.get(f)
+            if (r[f] is not None or empty) and (old.get(f) is not None or empty):
+                changes.append({"order_no": k[0], "pos": k[1], "field": f, "old": _fmt(old.get(f)) or empty,
+                                "new": _fmt(r[f]) or empty, "snapshot_id": snapshot_id, "at": now})
         to_update.append(r)
 
     if to_insert:
@@ -494,7 +504,7 @@ def load_svetofor(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
         sid = _snapshot(conn, "svetofor", origin, len(df))
         # Позиции, которых нет в свежем светофоре, помечаем, но не удаляем
         conn.execute(update(positions).values(in_svetofor=False))
-        stats = _upsert(conn, rows, TRACKED_SVETOFOR, sid)
+        stats = _upsert(conn, rows, TRACKED_SVETOFOR, sid, log_new=True)
         _fill_order_managers(conn)
         deferred = _apply_deferred(conn, sid)
     return {"source": "svetofor", "rows": len(df), "positions": len(rows), "deferred_applied": deferred, **stats}
@@ -508,7 +518,7 @@ def load_segments(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
         conn.execute(delete(segments))
         for i in range(0, len(segs), 5000):
             conn.execute(insert(segments), segs[i:i + 5000])
-        stats = _upsert(conn, pos_rows, TRACKED_SEGMENTS, sid)
+        stats = _upsert(conn, pos_rows, TRACKED_SEGMENTS, sid, log_new=True)
         _fill_order_managers(conn)
         deferred = _apply_deferred(conn, sid)
     return {"source": "segments", "rows": len(df), "positions": len(pos_rows), "deferred_applied": deferred, **stats}
