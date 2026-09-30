@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 
 from .bitrix import Bitrix, post_decade_changes
 from .config import Settings
-from .ingest import detect_source, load_file, load_segments, load_svetofor, read_table
+from .ingest import SOURCE_ORDER, detect_source, load_file, load_plan, load_dispatcher, load_segments, load_svetofor, read_table
 from .metabase import Metabase
 
 log = logging.getLogger("salesvisor.sync")
@@ -34,8 +34,7 @@ def import_folder(engine: Engine, folder: str) -> list[dict]:
             source = None
         parsed.append((f, data, source))
     # Сначала отрезки (менеджер, этапы), потом светофор; внутри — по времени изменения файла
-    order = {"segments": 0, "svetofor": 1}
-    parsed.sort(key=lambda x: (order.get(x[2], 2), x[0].stat().st_mtime))
+    parsed.sort(key=lambda x: (SOURCE_ORDER.get(x[2], 9), x[0].stat().st_mtime))
     results = []
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     for f, data, source in parsed:
@@ -76,4 +75,8 @@ def _from_metabase(engine: Engine, settings: Settings) -> list[dict]:
     results.append(load_segments(engine, read_table(data, "segments.csv"), f"metabase:card/{settings.card_segments}"))
     data = mb.card_csv(settings.card_svetofor)
     results.append(load_svetofor(engine, read_table(data, "svetofor.csv"), f"metabase:card/{settings.card_svetofor}"))
+    # План производства и диспетчерский — если для них заведены вопросы в Metabase
+    for card, loader, name in ((settings.card_plan, load_plan, "plan.csv"), (settings.card_dispatcher, load_dispatcher, "dispatcher.csv")):
+        if card:
+            results.append(loader(engine, read_table(mb.card_csv(card), name), f"metabase:card/{card}"))
     return results

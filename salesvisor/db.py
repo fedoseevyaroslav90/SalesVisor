@@ -5,7 +5,7 @@ import os
 
 from sqlalchemy import (
     Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, MetaData, String, Table, Text,
-    create_engine, func,
+    create_engine, func, inspect, text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
@@ -62,6 +62,18 @@ positions = Table(
     Column("bitrix_task", String(20)),
     Column("stage", String(40)),
     Column("closed", Boolean, nullable=False, default=False),
+    # План производства SAP: линия (рабочее место) и плановое окончание последней операции
+    Column("line", String(40)),
+    Column("plan_lines", String(200)),    # все линии позиции через запятую
+    Column("plan_end_date", Date),
+    Column("plan_end_time", String(5)),
+    Column("dse", String(40)),
+    Column("plan_msg", String(200)),
+    # Диспетчерский отчёт
+    Column("disp_decade", String(40)),    # признак декады, например «27. ОКТЯБРЬ 1декада»
+    Column("disp_counted", Boolean),      # ПО = «считать»: позиция входит в план декады
+    Column("disp_ready", String(40)),     # готов / не готов / готово 3 из 5 (назначена партия)
+    Column("disp_batch", String(40)),
     Column("first_seen_at", DateTime, server_default=func.now()),
     Column("updated_at", DateTime, server_default=func.now()),
 )
@@ -100,6 +112,22 @@ change_log = Table(
     Column("bitrix_sent", Boolean, nullable=False, default=False),
 )
 
+# Диспетчерский отчёт: план и факт позиции в единицах отчёта. Заменяется при каждой загрузке
+dispatcher = Table(
+    "dispatcher", metadata,
+    Column("order_no", String(20), primary_key=True),
+    Column("pos", String(10), primary_key=True),
+    Column("decade", String(40)),
+    Column("decade_no", Integer),         # порядковый номер декады в году из признака («27.» → 27)
+    Column("customer", String(300)),
+    Column("product", String(300)),
+    Column("counted", Boolean),
+    Column("km", Float), Column("pcs", Float), Column("ov_km", Float), Column("mz", Float), Column("vp", Float),
+    Column("km_ready", Float), Column("pcs_ready", Float), Column("ov_km_ready", Float),
+    Column("mz_ready", Float), Column("vp_ready", Float),
+    Column("segs", Integer), Column("segs_ready", Integer),
+)
+
 # Ручная связь заказа SAP с Битрикс24. Приоритетнее номера задачи, найденного в отчёте SAP
 bitrix_links = Table(
     "bitrix_links", metadata,
@@ -130,4 +158,16 @@ def make_engine(url: str) -> Engine:
     else:
         engine = create_engine(url, pool_pre_ping=True)
     metadata.create_all(engine)
+    _add_missing_columns(engine)
     return engine
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    """Базы, созданные прежней версией, получают новые колонки без потери данных."""
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in metadata.sorted_tables:
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for c in table.columns:
+                if c.name not in have:
+                    conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {c.name} {c.type.compile(engine.dialect)}'))

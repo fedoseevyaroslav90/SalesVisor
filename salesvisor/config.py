@@ -18,6 +18,9 @@ class Settings:
     metabase_password: str = field(default_factory=lambda: _env("METABASE_PASSWORD"))
     card_segments: int = field(default_factory=lambda: int(_env("METABASE_CARD_SEGMENTS", "522")))
     card_svetofor: int = field(default_factory=lambda: int(_env("METABASE_CARD_SVETOFOR", "573")))
+    # Вопросы с планом производства и диспетчерским отчётом; 0 — не забирать из Metabase
+    card_plan: int = field(default_factory=lambda: int(_env("METABASE_CARD_PLAN", "0") or 0))
+    card_dispatcher: int = field(default_factory=lambda: int(_env("METABASE_CARD_DISPATCHER", "0") or 0))
     verify_ssl: bool = field(default_factory=lambda: _env("METABASE_VERIFY_SSL", "1") != "0")
 
     # Битрикс24: адрес входящего вебхука вида https://portal/rest/<user>/<key>/

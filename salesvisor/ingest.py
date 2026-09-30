@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import re
 from collections import defaultdict
 from datetime import date, datetime
 
@@ -10,14 +11,21 @@ from sqlalchemy import bindparam, delete, insert, select, update
 from sqlalchemy.engine import Engine
 
 from . import parsing as p
-from .db import change_log, positions, segments, snapshots
+from .db import change_log, dispatcher, positions, segments, snapshots
 
 SVETOFOR_REQUIRED = ["Заказ", "Позиция", "Первая декада", "Текущая декада"]
 SEGMENTS_REQUIRED = ["Заказ клиента", "Позиция заказа клиента", "Номер отрезка по порядку в позиции", "Треб. дата поставки"]
 
+# План производства и диспетчерский отчёт SAP: колонки ищем по нормализованному заголовку
+# (регистр, точки и пробелы не важны). Наборы взяты из рабочих выгрузок, которые читал пилот
+PLAN_SIGNATURE = {"заказ клиента", "позиция заказа", "рабочее место", "дата конца", "номер дсе"}
+DISPATCHER_SIGNATURE = {"заказ клиента", "позиция заказа клиента", "признак декады", "плановые мз руб"}
+
 # Какие поля позиции отслеживаем между выгрузками
 TRACKED_SVETOFOR = ["current_decade", "color", "plan_ship_date"]
 TRACKED_SEGMENTS = ["required_date", "stage"]
+TRACKED_PLAN = ["line", "plan_end_date"]
+TRACKED_DISPATCHER = ["disp_decade", "disp_ready"]
 
 STAGES = [
     # (поле-счётчик, название этапа, когда все отрезки дошли до него)
@@ -33,12 +41,31 @@ STAGES = [
 def read_table(data: bytes, filename: str) -> pd.DataFrame:
     name = filename.lower()
     if name.endswith((".xlsx", ".xlsm")):
-        df = pd.read_excel(io.BytesIO(data), sheet_name=0, dtype=object)
+        df = pd.read_excel(io.BytesIO(data), sheet_name=pick_sheet(data), dtype=object)
     else:
         text = _decode(data)
         df = pd.read_csv(io.StringIO(text), dtype=str, sep=None, engine="python")
     df.columns = [str(c).strip() for c in df.columns]
     return df
+
+
+def _sheet_headers(data: bytes) -> list[tuple[str, list]]:
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        return [(ws.title, [c for c in next(ws.iter_rows(max_row=1, values_only=True), ()) if c is not None])
+                for ws in wb.worksheets]
+    finally:
+        wb.close()
+
+
+def pick_sheet(data: bytes, want: str | None = None):
+    """Лист с данными: в книге диспетчерского первым идёт сводный лист, а строки — на листе «данные»."""
+    for title, headers in _sheet_headers(data):
+        src = detect_source([str(h).strip() for h in headers])
+        if src and (want is None or src == want):
+            return title
+    return 0
 
 
 def _decode(data: bytes) -> str:
@@ -187,6 +214,140 @@ def stage_of(a: dict) -> str:
     return "Не произведён"
 
 
+# ---------------------------------------------------------------- план производства
+
+def _cols(df: pd.DataFrame) -> dict[str, str]:
+    """Нормализованный заголовок → исходное имя колонки (первое вхождение)."""
+    out: dict[str, str] = {}
+    for c in df.columns:
+        out.setdefault(p.norm_header(c), c)
+    return out
+
+
+def _get(r: dict, cols: dict[str, str], *names: str):
+    for n in names:
+        if n in cols:
+            v = r.get(cols[n])
+            if not p.is_blank(v):
+                return v
+    return None
+
+
+def parse_plan(df: pd.DataFrame) -> list[dict]:
+    """По позиции может быть несколько операций на разных линиях. Готовая продукция делается на последней:
+    берём линию и окончание операции с самым поздним плановым концом."""
+    cols = _cols(df)
+    missing = PLAN_SIGNATURE - set(cols)
+    if missing:
+        raise ValueError(f"В плане производства нет колонок: {', '.join(sorted(missing))}")
+    agg: dict[tuple[str, str], dict] = {}
+    for r in df.to_dict("records"):
+        order_no = _key(_get(r, cols, "заказ клиента"))
+        pos = _key(_get(r, cols, "позиция заказа", "позиция заказа клиента"))
+        if not order_no or not pos:
+            continue
+        line = p.text(_get(r, cols, "рабочее место"))
+        end_d = p.parse_date(_get(r, cols, "дата конца"))
+        end_t = p.parse_time(_get(r, cols, "время конца")) or ""
+        a = agg.setdefault((order_no, pos), {"order_no": order_no, "pos": pos, "_lines": [], "_best": None,
+                                             "dse": None, "plan_msg": None})
+        if line and line not in a["_lines"]:
+            a["_lines"].append(line)
+        a["dse"] = a["dse"] or p.text(_get(r, cols, "номер дсе"))
+        msg = " ".join(filter(None, [p.text(_get(r, cols, "сообщение")),
+                                     p.text(_get(r, cols, "описание сообщения по качеству"))]))
+        a["plan_msg"] = a["plan_msg"] or (msg[:200] or None)
+        key = (end_d or date.min, end_t)
+        if end_d and (a["_best"] is None or key > a["_best"][0]):
+            a["_best"] = (key, line)
+    rows = []
+    for a in agg.values():
+        best = a.pop("_best")
+        lines = a.pop("_lines")
+        a["line"] = best[1] if best and best[1] else (lines[-1] if lines else None)
+        a["plan_lines"] = ", ".join(lines)[:200] or None
+        a["plan_end_date"] = best[0][0] if best else None
+        a["plan_end_time"] = (best[0][1] or None) if best else None
+        rows.append(a)
+    return rows
+
+
+# ---------------------------------------------------------------- диспетчерский отчёт
+
+def _decade_no(label: str | None) -> int | None:
+    m = re.match(r"\s*(\d+)\.", label or "")
+    return int(m.group(1)) if m else None
+
+
+def _row_product(r: dict, columns) -> str | None:
+    """В диспетчерском две колонки «Материал»: наименование и код. Берём ту, где есть буквы."""
+    for c in columns:
+        if p.norm_header(c).startswith("материал"):
+            v = p.text(r.get(c))
+            if v and re.search("[A-Za-zА-Яа-я]", v):
+                return v
+    return None
+
+
+def parse_dispatcher(df: pd.DataFrame) -> list[dict]:
+    """Лист «данные» диспетчерского отчёта: строка на отрезок. Итоги считаются как в листе «отчет (итог)»:
+    план — все отрезки декады с ПО «считать», факт — из них те, где назначена партия («готов»).
+    ГП км — длина отрезков в КМ, ГП шт — количество в ШТ, ОВ — км волокна."""
+    cols = _cols(df)
+    missing = DISPATCHER_SIGNATURE - set(cols)
+    if missing:
+        raise ValueError(f"В диспетчерском отчёте нет колонок: {', '.join(sorted(missing))}")
+    ready_col = next((c for n, c in cols.items() if n.startswith("готов")), None)
+    agg: dict[tuple[str, str], dict] = {}
+    for r in df.to_dict("records"):
+        order_no = _key(_get(r, cols, "заказ клиента"))
+        pos = _key(_get(r, cols, "позиция заказа клиента"))
+        if not order_no or not pos:
+            continue
+        decade = p.text(_get(r, cols, "признак декады"))
+        ready = (p.text(r.get(ready_col)) or "").lower() == "готов" if ready_col else False
+        unit = (p.text(_get(r, cols, "базовая еи", "еи")) or "").upper()
+        qty = p.parse_number(_get(r, cols, "длина отдельного отрезка")) or 0
+        vals = {"km": qty if unit == "КМ" else 0, "pcs": qty if unit == "ШТ" else 0,
+                "ov_km": p.parse_number(_get(r, cols, "количество км волокна")) or 0,
+                "mz": p.parse_number(_get(r, cols, "плановые мз руб")) or 0,
+                "vp": p.parse_number(_get(r, cols, "вп")) or 0}
+        a = agg.get((order_no, pos))
+        if a is None:
+            a = agg[(order_no, pos)] = {
+                "order_no": order_no, "pos": pos, "decade": decade, "decade_no": _decade_no(decade),
+                "customer": p.text(_get(r, cols, "имя заказчика")),
+                "product": p.text(_row_product(r, df.columns)),
+                "counted": (p.text(_get(r, cols, "по")) or "").lower() == "считать",
+                "batch": None, "segs": 0, "segs_ready": 0,
+                **{k: 0.0 for k in vals}, **{f"{k}_ready": 0.0 for k in vals}}
+        a["segs"] += 1
+        a["segs_ready"] += int(ready)
+        a["batch"] = a["batch"] or _key(_get(r, cols, "партия"))
+        for k, v in vals.items():
+            a[k] += v
+            if ready:
+                a[f"{k}_ready"] += v
+    return list(agg.values())
+
+
+def parse_dispatcher_end_dates(df: pd.DataFrame) -> list[dict]:
+    """Лист 1S0D диспетчерского: плановое окончание производства позиции (дата и время конца)."""
+    cols = _cols(df)
+    rows: dict[tuple[str, str], dict] = {}
+    for r in df.to_dict("records"):
+        order_no = _key(_get(r, cols, "заказ клиента"))
+        pos = _key(_get(r, cols, "позиция заказа", "позиция заказа клиента"))
+        end_d = p.parse_date(_get(r, cols, "дата конца"))
+        if not order_no or not pos or not end_d:
+            continue
+        end_t = p.parse_time(_get(r, cols, "время конца"))
+        cur = rows.get((order_no, pos))
+        if cur is None or (end_d, end_t or "") > (cur["plan_end_date"], cur["plan_end_time"] or ""):
+            rows[(order_no, pos)] = {"order_no": order_no, "pos": pos, "plan_end_date": end_d, "plan_end_time": end_t}
+    return list(rows.values())
+
+
 # ---------------------------------------------------------------- запись в базу
 
 def _load_existing(conn, keys: set[tuple[str, str]], fields: list[str]) -> dict:
@@ -260,6 +421,47 @@ def load_segments(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
     return {"source": "segments", "rows": len(df), "positions": len(pos_rows), **stats}
 
 
+def load_plan(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
+    # Позиции, которых нет в свежем плане, не трогаем: план выгружается за период
+    rows = parse_plan(df)
+    with engine.begin() as conn:
+        sid = _snapshot(conn, "plan", origin, len(df))
+        known, unknown = _split_known(conn, rows)
+        stats = _upsert(conn, known, TRACKED_PLAN, sid)
+    return {"source": "plan", "rows": len(df), "positions": len(known), "not_in_orders": unknown, **stats}
+
+
+def load_dispatcher(engine: Engine, df: pd.DataFrame, origin: str, end_dates: pd.DataFrame | None = None) -> dict:
+    rows = parse_dispatcher(df)
+    with engine.begin() as conn:
+        sid = _snapshot(conn, "dispatcher", origin, len(df))
+        conn.execute(delete(dispatcher))
+        for i in range(0, len(rows), 5000):
+            conn.execute(insert(dispatcher), [{k: v for k, v in r.items() if k != "batch"} for r in rows[i:i + 5000]])
+        pos_rows = [{"order_no": r["order_no"], "pos": r["pos"], "disp_decade": r["decade"], "disp_counted": r["counted"],
+                     "disp_batch": r["batch"],
+                     "disp_ready": "готов" if r["segs_ready"] == r["segs"] else "не готов" if not r["segs_ready"]
+                     else f"готово {r['segs_ready']} из {r['segs']}"} for r in rows]
+        known, unknown = _split_known(conn, pos_rows)
+        stats = _upsert(conn, known, TRACKED_DISPATCHER, sid)
+        if end_dates is not None:
+            ends, _ = _split_known(conn, parse_dispatcher_end_dates(end_dates))
+            _upsert(conn, ends, [], sid)
+    return {"source": "dispatcher", "rows": len(df), "positions": len(known), "not_in_orders": unknown, **stats}
+
+
+def _split_known(conn, rows: list[dict]) -> tuple[list[dict], int]:
+    """План и диспетчерский дополняют позиции из отчёта по отрезкам и светофора, новых заказов не создают."""
+    have = {(o, ps) for o, ps in conn.execute(select(positions.c.order_no, positions.c.pos))}
+    known = [r for r in rows if (r["order_no"], r["pos"]) in have]
+    return known, len(rows) - len(known)
+
+
+LOADERS = {"segments": load_segments, "svetofor": load_svetofor, "plan": load_plan, "dispatcher": load_dispatcher}
+# Порядок загрузки из папки: сначала отрезки (менеджер, этапы), затем остальное
+SOURCE_ORDER = {"segments": 0, "svetofor": 1, "plan": 2, "dispatcher": 3}
+
+
 def _fill_order_managers(conn) -> None:
     """В светофоре нет менеджера: берём его с других позиций того же заказа."""
     by_order: dict[str, str] = {}
@@ -278,12 +480,21 @@ def _fill_order_managers(conn) -> None:
 
 
 def load_file(engine: Engine, source: str, data: bytes, filename: str) -> dict:
+    if source not in LOADERS:
+        raise ValueError("Неизвестный источник")
     df = read_table(data, filename)
-    if source == "svetofor":
-        return load_svetofor(engine, df, filename)
-    if source == "segments":
-        return load_segments(engine, df, filename)
-    raise ValueError("Неизвестный источник")
+    if source == "dispatcher" and filename.lower().endswith((".xlsx", ".xlsm")):
+        return load_dispatcher(engine, df, filename, end_dates=_end_dates_sheet(data))
+    return LOADERS[source](engine, df, filename)
+
+
+def _end_dates_sheet(data: bytes) -> pd.DataFrame | None:
+    for title, headers in _sheet_headers(data):
+        normed = {p.norm_header(h) for h in headers}
+        if {"заказ клиента", "дата конца"} <= normed and ("позиция заказа" in normed or "позиция заказа клиента" in normed) \
+                and "рабочее место" not in normed:
+            return pd.read_excel(io.BytesIO(data), sheet_name=title, dtype=object)
+    return None
 
 
 def detect_source(df_columns: list[str]) -> str | None:
@@ -292,4 +503,9 @@ def detect_source(df_columns: list[str]) -> str | None:
         return "segments"
     if set(SVETOFOR_REQUIRED) <= cols:
         return "svetofor"
+    normed = {p.norm_header(c) for c in df_columns}
+    if DISPATCHER_SIGNATURE <= normed:
+        return "dispatcher"
+    if PLAN_SIGNATURE <= normed:
+        return "plan"
     return None

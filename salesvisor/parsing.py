@@ -126,3 +126,20 @@ def parse_bitrix_task(v) -> str | None:
 def parse_int(v) -> int | None:
     n = parse_number(v)
     return int(n) if n is not None else None
+
+
+def norm_header(name) -> str:
+    """Заголовок SAP без регистра и знаков: «Позиция заказа клиента.» → «позиция заказа клиента»."""
+    s = str(name).lower().replace("ё", "е")
+    s = re.sub(r"[^0-9a-zа-я]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def parse_time(v) -> str | None:
+    """Время конца операции → «ЧЧ:ММ»."""
+    if is_blank(v):
+        return None
+    if hasattr(v, "hour"):
+        return f"{v.hour:02d}:{v.minute:02d}"
+    m = re.search(r"(\d{1,2}):(\d{2})", str(v))
+    return f"{int(m.group(1)):02d}:{m.group(2)}" if m else None

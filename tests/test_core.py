@@ -154,3 +154,53 @@ def test_import_folder_and_portal_guard(tmp_path):
     assert client.get("/api/meta", headers=h).json()["portal_user"] == "Иванова А."
     assert client.post("/api/orders/1200000007/comments", json={"text": "Проверка", "author": "кто-то"}, headers=h).status_code == 200
     assert client.get("/api/orders/1200000007", headers=h).json()["comments"][0]["author"] == "Иванова А."
+
+
+def test_plan_dispatcher_and_day():
+    from salesvisor.ingest import detect_source, load_dispatcher, load_plan
+    from salesvisor.queries import day_plan, dispatcher_summary
+
+    engine = make_engine("sqlite:///:memory:")
+    load_segments(engine, pd.DataFrame([
+        seg_row("1200000011", "10", "1", "10 октября, 2026"),
+        seg_row("1200000011", "10", "2", "10 октября, 2026", produced="@08@"),
+        seg_row("1200000011", "20", "1", "10 октября, 2026", produced="@08@"),
+    ]), "d1")
+    plan = pd.DataFrame([
+        {"Заказ клиента": "1200000011", "Позиция заказа": "10", "Рабочее место": "SZ-2", "Дата конца": "01.10.2026", "Время конца": "08:10", "Номер ДСЕ": "A"},
+        {"Заказ клиента": "1200000011", "Позиция заказа": "10", "Рабочее место": "OEL60-5", "Дата конца": "02.10.2026", "Время конца": "15:23", "Номер ДСЕ": "A"},
+        {"Заказ клиента": "1200000011", "Позиция заказа": "20", "Рабочее место": "OEL60-5", "Дата конца": "02.10.2026", "Время конца": "09:00", "Номер ДСЕ": "B"},
+        {"Заказ клиента": "1200009999", "Позиция заказа": "10", "Рабочее место": "OEL60-5", "Дата конца": "02.10.2026", "Время конца": "09:00", "Номер ДСЕ": "C"},
+    ])
+    assert detect_source(list(plan.columns)) == "plan"
+    r = load_plan(engine, plan, "plan.xlsx")
+    assert r["positions"] == 2 and r["not_in_orders"] == 1
+    card = order_card(engine, "1200000011")
+    p10 = card["positions"][0]
+    assert p10["line"] == "OEL60-5" and p10["plan_end_time"] == "15:23" and p10["plan_lines"] == "SZ-2, OEL60-5"
+
+    day = day_plan(engine, date(2026, 10, 2), today=date(2026, 10, 2))
+    assert day["summary"]["make"] == 2 and day["summary"]["make_done"] == 1
+    assert day["lines"][0]["line"] == "OEL60-5" and day["lines"][0]["make"] == 2
+    late = day_plan(engine, date(2026, 10, 3), with_backlog=True, today=date(2026, 10, 3))
+    assert [x["pos"] for x in late["positions"] if x["task_make"]] == ["10"]  # произведённая позиция не висит в хвосте
+
+    disp = pd.DataFrame([
+        {"Плановые МЗ (Руб)": 100, "ВП": 10, "Готов? (назначена партия - готов, пусто - не готов)": "готов", "ПО": "считать",
+         "Признак декады": "27. ОКТЯБРЬ 1декада", "Заказ клиента": "1200000011", "Позиция заказа клиента": "20",
+         "Длина отдельного отрезка": 2, "Базовая ЕИ": "КМ", "Количество км волокна": 32, "Партия": "9100000001"},
+        {"Плановые МЗ (Руб)": 50, "ВП": 5, "Готов? (назначена партия - готов, пусто - не готов)": "готов", "ПО": "считать",
+         "Признак декады": "27. ОКТЯБРЬ 1декада", "Заказ клиента": "1200000011", "Позиция заказа клиента": "10",
+         "Длина отдельного отрезка": 1, "Базовая ЕИ": "КМ", "Количество км волокна": 16, "Партия": "9100000002"},
+        {"Плановые МЗ (Руб)": 70, "ВП": 7, "Готов? (назначена партия - готов, пусто - не готов)": "не готов", "ПО": "не считать",
+         "Признак декады": "27. ОКТЯБРЬ 1декада", "Заказ клиента": "1200000012", "Позиция заказа клиента": "10",
+         "Длина отдельного отрезка": 3, "Базовая ЕИ": "КМ", "Количество км волокна": 8, "Партия": None},
+    ])
+    assert detect_source(list(disp.columns)) == "dispatcher"
+    load_dispatcher(engine, disp, "disp.xlsx")
+    s = dispatcher_summary(engine, decade="27. ОКТЯБРЬ 1декада")
+    dec = s["months"][0]["decades"][0]
+    assert dec["km"] == 3 and dec["km_ready"] == 3 and dec["mz"] == 150 and s["not_counted"] == 1
+    # Позиция 10: партия назначена, а по отрезкам произведена половина — расхождение
+    assert dec["mismatch"] == 1
+    assert order_card(engine, "1200000011")["positions"][1]["disp_ready"] == "готов"

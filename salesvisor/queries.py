@@ -4,10 +4,10 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, or_, select
 from sqlalchemy.engine import Engine
 
-from .db import bitrix_links, change_log, comments, positions, segments, snapshots
+from .db import bitrix_links, change_log, comments, dispatcher, positions, segments, snapshots
 
 COLOR_RANK = {"red": 0, "yellow": 1, "green": 2, None: 3}
 FIELD_NAMES = {
@@ -16,6 +16,10 @@ FIELD_NAMES = {
     "plan_ship_date": "План отгрузки",
     "required_date": "Треб. дата поставки",
     "stage": "Этап",
+    "line": "Линия",
+    "plan_end_date": "План. окончание производства",
+    "disp_decade": "Декада в диспетчерском",
+    "disp_ready": "Готовность в диспетчерском",
 }
 
 
@@ -193,4 +197,153 @@ def meta(engine: Engine) -> dict:
         depts = sorted({r[0] for r in conn.execute(select(positions.c.sales_dept).where(positions.c.closed.is_(False))) if r[0]})
         last = {r.source: _iso(r.loaded_at) for r in conn.execute(
             select(snapshots.c.source, snapshots.c.loaded_at).order_by(snapshots.c.loaded_at))}
-    return {"managers": managers, "depts": depts, "last_load": last, "today": date.today().isoformat()}
+        lines = sorted({r[0] for r in conn.execute(select(positions.c.line).where(positions.c.line.is_not(None))) if r[0]})
+    return {"managers": managers, "depts": depts, "lines": lines, "last_load": last, "today": date.today().isoformat()}
+
+
+def _produced(p: dict) -> bool:
+    total = p.get("segments_total") or 0
+    return bool(total) and (p.get("segments_produced") or 0) >= total
+
+
+def _shipped(p: dict) -> bool:
+    total = p.get("segments_total") or 0
+    return bool(p.get("closed")) or bool(total) and (p.get("segments_shipped") or 0) >= total
+
+
+def day_plan(engine: Engine, day: date, *, manager: str = "", dept: str = "", line: str = "",
+             with_backlog: bool = False, today: date | None = None) -> dict:
+    """Что по плану должно случиться в этот день: окончание производства (план производства, линия)
+    и отгрузка (план отгрузки светофора, иначе план дата отгрузки фактуры из отчёта по отрезкам).
+    С with_backlog добавляются невыполненные позиции с плановой датой раньше дня."""
+    today = today or date.today()
+    ship_col = positions.c.plan_ship_date
+    inv_col = positions.c.invoice_plan_date
+    if with_backlog:
+        cond = or_(positions.c.plan_end_date <= day, ship_col <= day, (ship_col.is_(None)) & (inv_col <= day))
+    else:
+        cond = or_(positions.c.plan_end_date == day, ship_col == day, (ship_col.is_(None)) & (inv_col == day))
+    stmt = select(positions).where(cond)
+    if manager:
+        stmt = stmt.where(positions.c.manager == manager)
+    if dept:
+        stmt = stmt.where(positions.c.sales_dept == dept)
+    if line:
+        stmt = stmt.where(positions.c.line == line)
+    with engine.connect() as conn:
+        rows = [position_view(dict(r._mapping), today) for r in conn.execute(stmt)]
+    out = []
+    for r in rows:
+        ship_plan = r.get("plan_ship_date") or r.get("invoice_plan_date")
+        make = bool(r.get("plan_end_date")) and (r["plan_end_date"] <= day.isoformat() if with_backlog
+                                                 else r["plan_end_date"] == day.isoformat())
+        ship = bool(ship_plan) and (ship_plan <= day.isoformat() if with_backlog else ship_plan == day.isoformat())
+        make_done, ship_done = _produced(r), _shipped(r)
+        if with_backlog:
+            # Из прошлых дней берём только невыполненное; сам день показываем целиком
+            make = make and (r["plan_end_date"] == day.isoformat() or not make_done)
+            ship = ship and (ship_plan == day.isoformat() or not ship_done)
+        if not (make or ship):
+            continue
+        out.append({**r, "ship_plan": ship_plan, "task_make": make, "task_ship": ship,
+                    "make_done": make_done, "ship_done": ship_done,
+                    "late": (make and not make_done and r["plan_end_date"] < day.isoformat())
+                            or (ship and not ship_done and ship_plan < day.isoformat())})
+    out.sort(key=lambda r: (r.get("line") or "яяя", r.get("plan_end_date") or "", r.get("plan_end_time") or "",
+                            r["order_no"], _pos_sort(r["pos"])))
+    make = [r for r in out if r["task_make"]]
+    ship = [r for r in out if r["task_ship"]]
+    summary = {
+        "positions": len(out),
+        "make": len(make), "make_done": sum(r["make_done"] for r in make),
+        "ship": len(ship), "ship_done": sum(r["ship_done"] for r in ship),
+        "late": sum(r["late"] for r in out),
+        "no_line": sum(1 for r in out if not r.get("line")),
+    }
+    by_line: dict[str, dict] = {}
+    for r in make:
+        b = by_line.setdefault(r.get("line") or "", {"line": r.get("line"), "make": 0, "make_done": 0, "km": 0.0})
+        b["make"] += 1
+        b["make_done"] += r["make_done"]
+        if (r.get("unit") or "").upper() in ("КМ", "KM"):
+            b["km"] += r.get("length_plan") or 0
+    return {"date": day.isoformat(), "summary": summary, "lines": sorted(by_line.values(), key=lambda b: b["line"] or "яяя"),
+            "positions": out}
+
+
+DISP_MEASURES = ["km", "pcs", "ov_km", "mz", "vp"]
+
+
+def _month_of(label: str) -> str:
+    parts = (label or "").split()
+    return parts[1] if len(parts) > 1 else ""
+
+
+def dispatcher_summary(engine: Engine, *, decade: str = "", manager: str = "", dept: str = "") -> dict:
+    """План и факт по декадам, как в листе «отчет (итог)» диспетчерского отчёта, плюс позиции выбранной декады."""
+    stmt = (select(dispatcher, positions.c.customer.label("pos_customer"), positions.c.manager, positions.c.line,
+                   positions.c.plan_end_date, positions.c.stage, positions.c.sales_dept,
+                   positions.c.segments_total, positions.c.segments_produced)
+            .select_from(dispatcher.outerjoin(positions, (positions.c.order_no == dispatcher.c.order_no)
+                                              & (positions.c.pos == dispatcher.c.pos))))
+    if manager:
+        stmt = stmt.where(positions.c.manager == manager)
+    if dept:
+        stmt = stmt.where(positions.c.sales_dept == dept)
+    with engine.connect() as conn:
+        rows = [_row(r) for r in conn.execute(stmt)]
+    for r in rows:
+        r["mismatch"] = _disp_mismatch(r)
+        r["customer"] = r.pop("pos_customer") or r["customer"]
+    counted = [r for r in rows if r["counted"] and r["decade_no"] is not None]
+    by_dec: dict[int, dict] = {}
+    for r in counted:
+        d = by_dec.setdefault(r["decade_no"], {"decade": r["decade"], "decade_no": r["decade_no"], "month": _month_of(r["decade"]),
+                                               "positions": 0, "positions_ready": 0, "mismatch": 0,
+                                               **{m: 0.0 for m in DISP_MEASURES}, **{f"{m}_ready": 0.0 for m in DISP_MEASURES}})
+        d["positions"] += 1
+        d["positions_ready"] += int(r["segs_ready"] == r["segs"])
+        d["mismatch"] += int(bool(r["mismatch"]) and r["mismatch"] != NOT_IN_SEGMENTS)
+        for m in DISP_MEASURES:
+            d[m] += r[m] or 0
+            d[f"{m}_ready"] += r[f"{m}_ready"] or 0
+    decades = [by_dec[k] for k in sorted(by_dec)]
+    months: list[dict] = []
+    for d in decades:
+        if not months or months[-1]["month"] != d["month"]:
+            months.append({"month": d["month"], "decades": [], **{m: 0.0 for m in DISP_MEASURES},
+                           **{f"{m}_ready": 0.0 for m in DISP_MEASURES}})
+        mo = months[-1]
+        mo["decades"].append(d)
+        for m in DISP_MEASURES:
+            mo[m] += d[m]
+            mo[f"{m}_ready"] += d[f"{m}_ready"]
+    total = {m: sum(d[m] for d in decades) for m in DISP_MEASURES}
+    total.update({f"{m}_ready": sum(d[f"{m}_ready"] for d in decades) for m in DISP_MEASURES})
+    detail = []
+    if decade:
+        detail = [r for r in rows if r["decade"] == decade]
+        # Сверху расхождения, потом не готовые из плана декады, затем остальное
+        detail.sort(key=lambda r: (not r["mismatch"] or r["mismatch"] == NOT_IN_SEGMENTS, not r["counted"],
+                                   r["segs_ready"] == r["segs"], -(r["mz"] or 0)))
+    return {"months": months, "total": total, "decade": decade, "positions": detail[:2000],
+            "not_counted": sum(1 for r in rows if not r["counted"]),
+            "no_decade": sum(1 for r in rows if r["counted"] and r["decade_no"] is None),
+            "loaded": bool(rows), "mismatch": sum(1 for r in counted if r["mismatch"] and r["mismatch"] != NOT_IN_SEGMENTS)}
+
+
+NOT_IN_SEGMENTS = "нет в отчёте по отрезкам"
+
+
+def _disp_mismatch(r: dict) -> str | None:
+    """Сверка с отчётом по отрезкам: партия назначена, а отрезки не произведены, и наоборот."""
+    total = r.get("segments_total")
+    if not total:
+        return NOT_IN_SEGMENTS if r.get("pos_customer") is None else None
+    produced = (r.get("segments_produced") or 0) >= total
+    ready = r["segs_ready"] == r["segs"]
+    if ready and not produced:
+        return "в диспетчерском готов, по отрезкам не произведён"
+    if produced and not ready:
+        return "по отрезкам произведён, в диспетчерском не готов"
+    return None

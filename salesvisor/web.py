@@ -119,6 +119,19 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
         b = card["bitrix"]
         return {"configured": True, **live_info(Bitrix(settings), b["task_id"], b["deal_id"])}
 
+    @app.get("/api/day")
+    def api_day(date: str = "", manager: str = "", dept: str = "", line: str = "", backlog: bool = False):
+        from datetime import date as _date
+        try:
+            day = _date.fromisoformat(date) if date else _date.today()
+        except ValueError as e:
+            raise HTTPException(400, "Дата в формате ГГГГ-ММ-ДД") from e
+        return queries.day_plan(engine, day, manager=manager, dept=dept, line=line, with_backlog=backlog)
+
+    @app.get("/api/dispatcher")
+    def api_dispatcher(decade: str = "", manager: str = "", dept: str = ""):
+        return queries.dispatcher_summary(engine, decade=decade, manager=manager, dept=dept)
+
     @app.get("/api/changes")
     def api_changes(days: int = 7, manager: str = ""):
         return queries.recent_changes(engine, days=max(1, min(days, 90)), manager=manager)

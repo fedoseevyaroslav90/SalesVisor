@@ -11,6 +11,8 @@
     <div class="brand">SalesVisor <span>контроль исполнения заказов</span></div>
     <nav class="tabs">
       <button data-tab="orders" class="active">Заказы</button>
+      <button data-tab="day">План на день</button>
+      <button data-tab="disp">Диспетчерский</button>
       <button data-tab="changes">Изменения</button>
       <button data-tab="load">Загрузка</button>
     </nav>
@@ -53,10 +55,62 @@
       </div>
     </section>
 
+    <section id="tab-day" class="tab">
+      <div class="toolbar">
+        <label>День <input id="dayDate" type="date"></label>
+        <label>Линия <select id="dayLine"><option value="">Все</option></select></label>
+        <label>Показать <select id="dayWhat">
+          <option value="">Производство и отгрузку</option>
+          <option value="make">Только производство</option>
+          <option value="ship">Только отгрузку</option>
+        </select></label>
+        <label class="check"><input id="dayBacklog" type="checkbox"> и невыполненное за прошлые дни</label>
+      </div>
+      <p class="meta-line" id="dayNote"></p>
+      <div class="tiles" id="dayTiles"></div>
+      <div class="line-strip" id="dayLines"></div>
+      <div class="table-wrap">
+        <table id="dayTable">
+          <thead><tr><th>Линия</th><th>Окончание</th><th>Заказ / поз.</th><th>Клиент</th><th>Изделие</th><th>Менеджер</th><th>План отгрузки</th><th>Этап</th><th>Выполнение</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p class="empty" id="dayEmpty" hidden></p>
+      </div>
+    </section>
+
+    <section id="tab-disp" class="tab">
+      <div class="toolbar"><label class="check"><input id="dispAll" type="checkbox"> Показать весь год</label></div>
+      <p class="meta-line" id="dispNote"></p>
+      <div class="table-wrap">
+        <table id="dispTable" class="disp">
+          <thead>
+            <tr><th rowspan="2">Декада</th><th colspan="5">План</th><th colspan="5">Факт (назначена партия)</th><th rowspan="2">% ГП, км</th><th rowspan="2">% МЗ</th><th rowspan="2" title="Готовых позиций из всех">Поз.</th><th rowspan="2" title="Готовность в диспетчерском не совпадает с отчётом по отрезкам">Расх.</th></tr>
+            <tr><th>ГП, км</th><th>ГП, шт</th><th>ОВ, км</th><th>МЗ, млн ₽</th><th>ВП, млн ₽</th><th>ГП, км</th><th>ГП, шт</th><th>ОВ, км</th><th>МЗ, млн ₽</th><th>ВП, млн ₽</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p class="empty" id="dispEmpty" hidden>Диспетчерский отчёт ещё не загружен. Загрузите книгу на вкладке «Загрузка».</p>
+      </div>
+      <h3 id="dispDetailTitle" hidden></h3>
+      <div class="toolbar" id="dispDetailBar" hidden>
+        <label>Показать <select id="dispFilter">
+          <option value="">Все позиции декады</option>
+          <option value="todo">Не готовые</option>
+          <option value="mismatch">Расхождения с отчётом по отрезкам</option>
+        </select></label>
+      </div>
+      <div class="table-wrap" id="dispDetailWrap" hidden>
+        <table id="dispDetail">
+          <thead><tr><th>Заказ / поз.</th><th>Клиент</th><th>Изделие</th><th>Менеджер</th><th>ГП, км</th><th>МЗ, тыс. ₽</th><th>Партия назначена</th><th>Этап по отрезкам</th><th>Сверка</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
     <section id="tab-changes" class="tab">
       <div class="toolbar">
         <label>За <select id="days"><option value="1">1 день</option><option value="7" selected>7 дней</option><option value="30">30 дней</option></select></label>
-        <label>Что <select id="field"><option value="">Всё</option><option value="current_decade">Текущая декада</option><option value="required_date">Треб. дата</option><option value="color">Цвет</option><option value="stage">Этап</option></select></label>
+        <label>Что <select id="field"><option value="">Всё</option><option value="current_decade">Текущая декада</option><option value="required_date">Треб. дата</option><option value="color">Цвет</option><option value="stage">Этап</option><option value="line">Линия</option><option value="plan_end_date">План. окончание</option><option value="disp_decade">Признак декады</option></select></label>
       </div>
       <div class="table-wrap">
         <table class="changes" id="changes">
@@ -68,11 +122,11 @@
     </section>
 
     <section id="tab-load" class="tab">
-      <p class="lead">Обычно данные приходят сами из Metabase по расписанию. Здесь можно загрузить выгрузку вручную: CSV или Excel из вопросов «Отчёт по отрезкам xt» и «Светофор v2». Тип файла определяется по колонкам.</p>
+      <p class="lead">Обычно данные приходят сами из Metabase по расписанию. Здесь можно загрузить выгрузку вручную: CSV или Excel из вопросов «Отчёт по отрезкам xt» и «Светофор v2», а также план производства и диспетчерский отчёт из SAP. Тип файла определяется по колонкам.</p>
       <div class="cards">
         <div class="card">
           <h3>Загрузить файл</h3>
-          <p>Сначала отчёт по отрезкам, потом светофор.</p>
+          <p>Сначала отчёт по отрезкам, потом светофор, план производства и диспетчерский.</p>
           <div class="actions"><label class="btn">Выбрать файл<input id="file" type="file" accept=".csv,.xlsx" hidden></label></div>
           <div class="result" id="loadResult"></div>
         </div>

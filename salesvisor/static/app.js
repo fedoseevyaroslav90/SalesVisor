@@ -23,6 +23,8 @@
     document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x === b));
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
     if (b.dataset.tab === 'changes') loadChanges();
+    if (b.dataset.tab === 'day') loadDay().catch(showDayErr);
+    if (b.dataset.tab === 'disp') loadDisp().catch(err => { $('#dispEmpty').hidden = false; $('#dispEmpty').textContent = 'Не удалось загрузить: ' + err.message; });
   }));
 
   // ---------- справочники ----------
@@ -34,8 +36,11 @@
     };
     fill($('#manager'), state.meta.managers, store.get('manager'));
     fill($('#dept'), state.meta.depts, store.get('dept'));
+    fill($('#dayLine'), state.meta.lines || [], '');
+    if (!$('#dayDate').value) $('#dayDate').value = state.meta.today;
     const l = state.meta.last_load || {};
-    $('#lastLoad').textContent = [l.segments && 'отрезки ' + fmtDT(l.segments), l.svetofor && 'светофор ' + fmtDT(l.svetofor)].filter(Boolean).join(' · ');
+    $('#lastLoad').textContent = [l.segments && 'отрезки ' + fmtDT(l.segments), l.svetofor && 'светофор ' + fmtDT(l.svetofor),
+      l.plan && 'план ' + fmtDT(l.plan), l.dispatcher && 'диспетчерский ' + fmtDT(l.dispatcher)].filter(Boolean).join(' · ');
     $('#mbState').textContent = state.meta.metabase_ready ? 'Metabase подключён. Данные обновляются по расписанию, кнопка обновит их сразу.'
       : state.meta.import_dir ? 'Выгрузки приходят в папку на сервере и забираются по расписанию. Кнопка заберёт их сразу.'
       : 'Нужен API-ключ Metabase (METABASE_API_KEY) или папка выгрузок (IMPORT_DIR) в настройках сервера.';
@@ -129,10 +134,14 @@
         <td class="num">${p.shift_days == null ? '—' : p.shift_days}</td>
         <td>${fmt(p.required_date)}</td>
         <td>${fmt(p.plan_ship_date || p.invoice_plan_date)}</td>
+        <td>${p.line ? `<b>${esc(p.line)}</b><div class="sub">${fmt(p.plan_end_date)} ${esc(p.plan_end_time || '')}</div>` : '<span class="muted">—</span>'}</td>
         <td>${esc(p.stage)}</td>
         <td>${p.segments.length ? `<span class="linkish">${p.segments.length}</span>` : '—'}</td>
       </tr>
-      <tr class="seg" data-for="${esc(p.pos)}" hidden><td></td><td colspan="9">
+      <tr class="seg" data-for="${esc(p.pos)}" hidden><td></td><td colspan="10">
+        ${p.plan_lines && p.plan_lines !== p.line ? `<div>Операции на линиях: ${esc(p.plan_lines)}</div>` : ''}
+        ${p.dse ? `<div>ДСЕ ${esc(p.dse)}${p.plan_msg ? ' · ' + esc(p.plan_msg) : ''}</div>` : ''}
+        ${dispLine(p)}
         ${p.segments.map(s => `<div>№${esc(s.seg_no)}: ${s.length ?? '—'} ${esc(s.unit || '')} <span class="flags">${FLAGS.map(([k, l, t]) => `<span class="${s[k] ? 'on' : ''}" title="${t}">${l}</span>`).join('')}</span>
           ${s.fact_ship_date ? 'отгружен ' + fmt(s.fact_ship_date) : ''} ${s.prod_order ? '· зак. на пр-во ' + esc(s.prod_order) : ''}</div>`).join('')}
         ${p.reject_text ? `<div>Причина отклонения: ${esc(p.reject_code || '')} ${esc(p.reject_text)}</div>` : ''}
@@ -157,7 +166,7 @@
 
       <h3>Позиции</h3>
       <div class="table-wrap"><table class="mini">
-        <thead><tr><th></th><th>Поз.</th><th>Изделие</th><th>Первая декада</th><th>Текущая декада</th><th>Смещ., дн.</th><th>Треб. дата</th><th>План отгрузки</th><th>Этап</th><th>Отрезки</th></tr></thead>
+        <thead><tr><th></th><th>Поз.</th><th>Изделие</th><th>Первая декада</th><th>Текущая декада</th><th>Смещ., дн.</th><th>Треб. дата</th><th>План отгрузки</th><th title="План производства: линия и плановое окончание">Линия</th><th>Этап</th><th>Отрезки</th></tr></thead>
         <tbody>${posRows}</tbody>
       </table></div>
 
@@ -223,6 +232,147 @@
   $('#closeDrawer').addEventListener('click', () => { $('#drawer').hidden = true; });
   $('#drawer').addEventListener('click', e => { if (e.target.id === 'drawer') $('#drawer').hidden = true; });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#drawer').hidden = true; });
+
+  function dispLine(p) {
+    const parts = [
+      p.disp_decade && esc(p.disp_decade),
+      p.disp_counted === false && 'не считать',
+      p.disp_ready && esc(p.disp_ready),
+      p.disp_batch && 'партия ' + esc(p.disp_batch),
+    ].filter(Boolean);
+    return parts.length ? `<div>Диспетчерский: ${parts.join(' · ')}</div>` : '';
+  }
+
+  // ---------- план на день ----------
+  state.dayLine = '';
+  async function loadDay() {
+    const qs = new URLSearchParams({
+      date: $('#dayDate').value || state.meta.today || '',
+      manager: $('#manager').value, dept: $('#dept').value, backlog: $('#dayBacklog').checked,
+    });
+    state.day = await api('api/day?' + qs);
+    renderDay();
+  }
+  function showDayErr(err) { $('#dayEmpty').hidden = false; $('#dayEmpty').textContent = 'Не удалось загрузить план: ' + err.message; }
+  function taskTag(kind, done, late) {
+    const name = kind === 'make' ? 'произвести' : 'отгрузить';
+    const cls = done ? 'done' : late ? 'late' : 'todo';
+    return `<span class="task ${cls}">${done ? (kind === 'make' ? 'произведено' : 'отгружено') : name}</span>`;
+  }
+  function renderDay() {
+    const d = state.day, what = $('#dayWhat').value, lineSel = $('#dayLine').value || state.dayLine;
+    const s = d.summary;
+    const hasPlan = (state.meta.lines || []).length > 0;
+    $('#dayNote').textContent = (hasPlan ? '' : 'План производства ещё не загружен: линии и плановое окончание появятся после загрузки выгрузки SAP «План производства». Пока показан план отгрузки. ')
+      + `Для менеджера и отдела действуют фильтры с вкладки «Заказы».`;
+    const tiles = [
+      ['', 'Позиций в плане', s.positions],
+      ['green', 'Произвести: сделано', `${s.make_done}/${s.make}`],
+      ['green', 'Отгрузить: сделано', `${s.ship_done}/${s.ship}`],
+      ['late', 'Отстают от плана', s.late],
+    ];
+    $('#dayTiles').innerHTML = tiles.map(([c, l, v]) => `<div class="tile ${c}" style="cursor:default"><div class="n">${v}</div><div class="l">${l}</div></div>`).join('');
+    $('#dayLines').innerHTML = d.lines.map(b => `<button class="line-chip ${lineSel === (b.line || '-') ? 'active' : ''}" data-line="${esc(b.line || '-')}">
+      ${esc(b.line || 'линия не указана')} · <b>${b.make_done}/${b.make}</b>${b.km ? ` · ${b.km.toLocaleString('ru-RU', { maximumFractionDigits: 1 })} км` : ''}</button>`).join('');
+    document.querySelectorAll('.line-chip').forEach(c => c.addEventListener('click', () => {
+      state.dayLine = state.dayLine === c.dataset.line ? '' : c.dataset.line;
+      $('#dayLine').value = '';
+      renderDay();
+    }));
+    const rows = d.positions.filter(r => (!what || (what === 'make' ? r.task_make : r.task_ship)) &&
+      (!lineSel || (lineSel === '-' ? !r.line : r.line === lineSel)));
+    $('#dayEmpty').hidden = rows.length > 0;
+    $('#dayEmpty').textContent = 'На этот день по плану ничего нет.';
+    let prev = null;
+    $('#dayTable tbody').innerHTML = rows.slice(0, 1500).map(r => {
+      const head = r.line !== prev && hasPlan ? `<tr class="line-head"><td colspan="9">${esc(r.line || 'Линия не указана')}</td></tr>` : '';
+      prev = r.line;
+      return head + `<tr data-no="${esc(r.order_no)}">
+        <td>${esc(r.line || '—')}</td>
+        <td>${r.plan_end_date ? fmt(r.plan_end_date) + ' ' + esc(r.plan_end_time || '') : '—'}</td>
+        <td><b>${esc(r.order_no)}</b> / ${esc(r.pos)}</td>
+        <td>${esc(r.customer || '—')}</td>
+        <td>${esc(r.product || '')}</td>
+        <td>${esc(r.manager || '')}</td>
+        <td>${fmt(r.ship_plan)}</td>
+        <td>${esc(r.stage)}</td>
+        <td>${r.task_make ? taskTag('make', r.make_done, r.late && !r.make_done) : ''}${r.task_ship ? taskTag('ship', r.ship_done, r.late && !r.ship_done) : ''}</td>
+      </tr>`;
+    }).join('');
+    document.querySelectorAll('#dayTable tbody tr[data-no]').forEach(tr => tr.addEventListener('click', () => openOrder(tr.dataset.no)));
+  }
+  ['#dayDate', '#dayBacklog'].forEach(id => $(id).addEventListener('change', () => loadDay().catch(showDayErr)));
+  $('#dayLine').addEventListener('change', () => { state.dayLine = ''; renderDay(); });
+  $('#dayWhat').addEventListener('change', renderDay);
+
+  // ---------- диспетчерский ----------
+  const MONTHS_UP = ['ЯНВАРЬ', 'ФЕВРАЛЬ', 'МАРТ', 'АПРЕЛЬ', 'МАЙ', 'ИЮНЬ', 'ИЮЛЬ', 'АВГУСТ', 'СЕНТЯБРЬ', 'ОКТЯБРЬ', 'НОЯБРЬ', 'ДЕКАБРЬ'];
+  const num = (v, d = 1) => (v ? v.toLocaleString('ru-RU', { maximumFractionDigits: d, minimumFractionDigits: 0 }) : '0');
+  const mln = v => num((v || 0) / 1e6, 1);
+  function pctCell(fact, plan) {
+    if (!plan) return '<td>—</td>';
+    const p = Math.round(100 * fact / plan);
+    return `<td class="${p >= 95 ? 'pct-ok' : p >= 70 ? 'pct-mid' : 'pct-low'}">${p}%</td>`;
+  }
+  function measureCells(x) {
+    return `<td>${num(x.km)}</td><td>${num(x.pcs, 0)}</td><td>${num(x.ov_km, 0)}</td><td>${mln(x.mz)}</td><td>${mln(x.vp)}</td>
+      <td>${num(x.km_ready)}</td><td>${num(x.pcs_ready, 0)}</td><td>${num(x.ov_km_ready, 0)}</td><td>${mln(x.mz_ready)}</td><td>${mln(x.vp_ready)}</td>
+      ${pctCell(x.km_ready, x.km)}${pctCell(x.mz_ready, x.mz)}`;
+  }
+  function currentDecadeLabel(months) {
+    const t = new Date(state.meta.today || Date.now());
+    const want = MONTHS_UP[t.getMonth()], n = t.getDate() <= 10 ? 1 : t.getDate() <= 20 ? 2 : 3;
+    for (const mo of months) for (const d of mo.decades) if (d.decade.includes(want) && d.decade.replace(/\s/g, '').includes(n + 'декада')) return d.decade;
+    return '';
+  }
+  async function loadDisp(decade) {
+    const qs = new URLSearchParams({ manager: $('#manager').value, dept: $('#dept').value, decade: decade ?? state.dispDecade ?? '' });
+    let d = await api('api/dispatcher?' + qs);
+    if (decade === undefined && state.dispDecade === undefined && d.loaded) {
+      state.dispDecade = currentDecadeLabel(d.months);
+      if (state.dispDecade) { qs.set('decade', state.dispDecade); d = await api('api/dispatcher?' + qs); }
+    }
+    if (decade !== undefined) state.dispDecade = decade;
+    state.disp = d;
+    renderDisp();
+  }
+  function renderDisp() {
+    const d = state.disp;
+    $('#dispEmpty').hidden = d.loaded;
+    $('#dispNote').textContent = d.loaded ? `План — позиции с ПО «считать», факт — из них с назначенной партией, как в листе «отчет (итог)». `
+      + `Не считаются: ${d.not_counted} поз., без декады («без учета»): ${d.no_decade}. Расхождений с отчётом по отрезкам: ${d.mismatch}. Нажмите на декаду, чтобы увидеть позиции.` : '';
+    let html = '';
+    // По умолчанию — текущий месяц и два соседних; весь год по галочке
+    const curIdx = MONTHS_UP.indexOf((state.dispDecade || '').split(/\s+/)[1] || '');
+    const visible = mo => $('#dispAll').checked || curIdx < 0 || Math.abs(MONTHS_UP.indexOf(mo.month) - curIdx) <= 1;
+    for (const mo of d.months.filter(visible)) {
+      for (const x of mo.decades) {
+        html += `<tr class="dec ${x.decade === state.dispDecade ? 'active' : ''}" data-dec="${esc(x.decade)}"><td>${esc(x.decade)}</td>${measureCells(x)}
+          <td>${x.positions_ready}/${x.positions}</td><td>${x.mismatch ? `<span class="late-tag">${x.mismatch}</span>` : '0'}</td></tr>`;
+      }
+      html += `<tr class="month"><td>${esc(mo.month)} итого</td>${measureCells(mo)}<td></td><td></td></tr>`;
+    }
+    if (d.months.length) html += `<tr class="total"><td>Всего за год</td>${measureCells(d.total)}<td></td><td></td></tr>`;
+    $('#dispTable tbody').innerHTML = html;
+    document.querySelectorAll('#dispTable tr.dec').forEach(tr => tr.addEventListener('click', () => loadDisp(tr.dataset.dec).catch(showErr)));
+    const show = !!d.decade;
+    ['#dispDetailTitle', '#dispDetailBar', '#dispDetailWrap'].forEach(id => { $(id).hidden = !show; });
+    if (!show) return;
+    $('#dispDetailTitle').textContent = 'Позиции: ' + d.decade;
+    const f = $('#dispFilter').value;
+    const rows = d.positions.filter(r => !f || (f === 'todo' ? r.segs_ready < r.segs : !!r.mismatch));
+    $('#dispDetail tbody').innerHTML = rows.slice(0, 1000).map(r => `<tr data-no="${esc(r.order_no)}">
+      <td><b>${esc(r.order_no)}</b> / ${esc(r.pos)}${r.counted ? '' : ' <span class="sub">не считать</span>'}</td>
+      <td>${esc(r.customer || '—')}</td><td>${esc(r.product || '')}</td><td>${esc(r.manager || '')}</td>
+      <td class="num">${num(r.km, 3)}</td><td class="num">${num((r.mz || 0) / 1e3, 0)}</td>
+      <td>${r.segs_ready === r.segs ? '<span class="task done">да</span>' : r.segs_ready ? `<span class="task todo">${r.segs_ready} из ${r.segs}</span>` : '<span class="task late">нет</span>'}</td>
+      <td>${esc(r.stage || '—')}</td>
+      <td>${r.mismatch ? `<span class="late-tag">${esc(r.mismatch)}</span>` : '<span class="muted">сходится</span>'}</td>
+    </tr>`).join('') || '<tr><td colspan="9" class="muted">Нет позиций под фильтр.</td></tr>';
+    document.querySelectorAll('#dispDetail tbody tr[data-no]').forEach(tr => tr.addEventListener('click', () => openOrder(tr.dataset.no).catch(showErr)));
+  }
+  $('#dispFilter').addEventListener('change', renderDisp);
+  $('#dispAll').addEventListener('change', renderDisp);
 
   // ---------- изменения ----------
   async function loadChanges() {
