@@ -32,7 +32,7 @@ button, input, select { font: inherit; }
 .tabs button { border: 0; background: none; padding: 8px 12px; border-radius: 6px; cursor: pointer; color: var(--muted); }
 .tabs button.active { background: #e8eefc; color: var(--accent); font-weight: 600; }
 
-main { padding: 16px 20px 40px; max-width: 1400px; margin: 0 auto; }
+main { padding: 16px 20px 40px; }  /* во всю ширину экрана: таблицы должны помещаться без полосы прокрутки */
 .tab { display: none; }
 .tab.active { display: block; }
 
@@ -55,8 +55,16 @@ main { padding: 16px 20px 40px; max-width: 1400px; margin: 0 auto; }
 
 .table-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
-th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
-th { font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .02em; background: #fafbfc; position: sticky; top: 0; }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+/* заголовки переносятся по словам — ширину колонки задают данные, а не подпись */
+th { font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .02em; background: #fafbfc; position: sticky; top: 0; white-space: normal; vertical-align: bottom; }
+/* длинный текст (клиент, изделие, отдел, этап, «было/стало») переносится, чтобы таблица помещалась в ширину экрана */
+td.wrap, .mini td, #orders td:nth-child(3), #orders td:nth-child(4), #changes td:nth-child(4), #changes td:nth-child(7), #changes td:nth-child(8),
+#dayTable td:nth-child(7), #dispDetail td:nth-child(8), table.disp td:first-child { white-space: normal; overflow-wrap: anywhere; }
+#orders td:nth-child(3) { min-width: 180px; }
+#orders td:nth-child(4) { min-width: 140px; }
+.mini tr.pos td:nth-child(3) { min-width: 200px; }
+.mini .late-tag { white-space: nowrap; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: #f7f9fd; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -138,7 +146,7 @@ textarea { width: 100%; min-height: 60px; resize: vertical; }
 .cnt.red { color: var(--overdue); }
 .cnt.yellow { color: var(--warn); }
 .late-tag { color: var(--overdue); font-weight: 600; font-size: 12px; }
-.drawer-inner.wide { width: min(1100px, 100%); }
+.drawer-inner.wide { width: min(1700px, 100%); }  /* карточка заказа — почти во весь экран: позиции без горизонтальной прокрутки */
 .mini tr.seg td { background: #fafbfc; font-size: 12px; color: var(--muted); }
 .flags span { display: inline-block; width: 16px; text-align: center; border-radius: 3px; margin-right: 2px; font-size: 11px; background: var(--line); color: var(--muted); }
 .flags span.on { background: var(--ok-bg); color: var(--ok); font-weight: 700; }
@@ -173,3 +181,18 @@ table.disp tr.total td { font-weight: 700; border-top: 2px solid var(--line); }
 .q-tag { display: inline-block; font-size: 12px; color: var(--noplan); background: var(--noplan-bg); border-radius: 4px; padding: 1px 6px; margin-top: 2px; }
 .tile.quality .n { color: var(--noplan); }
 #dayTable td:last-child { white-space: normal; min-width: 170px; }
+
+/* экраны до 1280 px (ноутбуки 1024–1280): плотнее, чтобы таблицы по-прежнему помещались без полосы прокрутки */
+@media (max-width: 1280px) {
+  main { padding: 12px 12px 40px; }
+  table { font-size: 13px; }
+  th, td { padding: 6px 6px; }
+  th { font-size: 11px; letter-spacing: 0; }
+  .bar { width: 44px; }
+  #orders td:nth-child(3) { min-width: 120px; }
+  #orders td:nth-child(4) { min-width: 100px; }
+  #dispDetail td:nth-child(2), #dispDetail td:nth-child(3), #dayTable td:nth-child(3), #dayTable td:nth-child(4) { min-width: 120px; }
+  #dispDetail td:last-child, #dayTable td:last-child { min-width: 130px; }
+  table.disp td, table.disp th { padding: 6px 4px; font-size: 12px; }
+  .drawer-inner { padding: 16px 12px 40px; }
+}
