@@ -194,6 +194,16 @@ comments = Table(
     Column("created_at", DateTime, nullable=False, server_default=func.now()),
 )
 
+# Преднастройки сотрудника (30.09.2026): сохранённые отборы, последний отбор, свой логин SAP («Создал»).
+# Ключ — алиас сотрудника портала из X-SalesVisor-User; без портала (локальный запуск) — «local»
+user_prefs = Table(
+    "user_prefs", metadata,
+    Column("alias", String(64), primary_key=True),
+    Column("person", String(200)),
+    Column("data", Text, nullable=False),
+    Column("updated_at", DateTime, nullable=False, server_default=func.now()),
+)
+
 
 def make_engine(url: str) -> Engine:
     if url.startswith("sqlite:///") and not url.endswith(":memory:"):

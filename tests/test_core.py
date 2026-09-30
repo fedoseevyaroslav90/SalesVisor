@@ -359,3 +359,42 @@ def test_reject_goz_inkab_and_soon_tile():
     assert nums({"flags": "goz"}) == ["1200000051", "1200000053"]
     assert nums({"flags": "noinkab"}) == ["1200000051", "1200000053"]  # Дальний Восток не внутренний
     assert [o["order_no"] for o in list_orders(engine, color="soon", today=today)] == ["1200000051"]
+
+
+def test_multi_value_filters():
+    """Выбор нескольких значений: менеджеры, этапы, причины — через «|» (этап и причина — и через запятую)."""
+    from salesvisor.queries import Filters, day_plan, list_positions
+
+    engine = make_engine("sqlite:///:memory:")
+    load_segments(engine, pd.DataFrame([
+        seg_row("1200000061", "10", "1", "3 октября, 2026", manager="IVANOVA"),
+        seg_row("1200000062", "10", "1", "3 октября, 2026", manager="PETROV", produced="@08@"),
+        seg_row("1200000063", "10", "1", "3 октября, 2026", manager="SIDOROVA"),
+    ]), "d1")
+    today = date(2026, 9, 30)
+    nums = lambda **kw: sorted(p["order_no"] for p in list_positions(
+        engine, manager=kw.pop("manager", ""), filters=Filters.from_query(**kw), today=today)["rows"])
+    assert nums(manager="IVANOVA|PETROV") == ["1200000061", "1200000062"]
+    assert nums(manager="PETROV") == ["1200000062"]
+    assert nums(stage="made|not_made") == ["1200000061", "1200000062", "1200000063"]
+    assert nums(stage="made,in_prod") == ["1200000062"]
+    assert nums(line="-|OEL60-5") == ["1200000061", "1200000062", "1200000063"]
+    assert day_plan(engine, date(2026, 10, 3), manager="IVANOVA|SIDOROVA", today=today)["summary"]["positions"] == 0
+
+
+def test_user_prefs_per_portal_user():
+    """Преднастройки хранятся за сотрудником портала: у каждого свои, чужие не видны."""
+    engine = make_engine("sqlite:///:memory:")
+    client = TestClient(create_app(engine, Settings(database_url="sqlite:///:memory:", portal_token="s3cret")))
+    ivan = {"X-SalesVisor-Token": "s3cret", "X-SalesVisor-User": "user-ivanova"}
+    petr = {"X-SalesVisor-Token": "s3cret", "X-SalesVisor-User": "user-petrov"}
+    assert client.get("/api/prefs", headers=ivan).json() == {"alias": "user-ivanova", "views": [], "last": "", "sap_login": ""}
+    assert client.put("/api/prefs", headers=ivan, json={"views": [{"name": "Мои просрочки", "query": "flags=overdue"}],
+                                                         "sap_login": "IVANOVA"}).status_code == 200
+    assert client.put("/api/prefs", headers=ivan, json={"last": "line=OEL60-5"}).status_code == 200  # остальное не трогает
+    p = client.get("/api/prefs", headers=ivan).json()
+    assert p["views"][0]["name"] == "Мои просрочки" and p["sap_login"] == "IVANOVA" and p["last"] == "line=OEL60-5"
+    assert client.get("/api/prefs", headers=petr).json()["views"] == []
+    assert client.put("/api/prefs", headers=petr, json={"views": [{"name": "x" * 61, "query": ""}]}).status_code == 422
+    # без сотрудника от портала преднастроек нет
+    assert client.get("/api/prefs", headers={"X-SalesVisor-Token": "s3cret"}).status_code == 400

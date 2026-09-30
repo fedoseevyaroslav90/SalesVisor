@@ -56,15 +56,27 @@ def position_view(pos: dict, today: date) -> dict:
             "stage": pos.get("stage") or "Нет в отчёте по отрезкам"}
 
 
+def vals(v: str | None, codes: bool = False) -> list[str]:
+    """Значение фильтра «из нескольких»: «A|B» → [A, B]; для кодов — и «A,B»."""
+    parts = (v or "").replace(",", "|").split("|") if codes else (v or "").split("|")
+    return [x.strip() for x in parts if x.strip()]
+
+
+def _in(col, v: str):
+    """Условие «колонка в списке» для фильтра менеджера, отдела, линии (одно значение — как раньше)."""
+    items = vals(v)
+    return col == items[0] if len(items) == 1 else col.in_(items)
+
+
 def _load_positions(engine: Engine, scope: str, manager: str, dept: str, today: date):
     """Позиции под область и фильтры менеджера/отдела + счётчики комментариев, связи Битрикс24 и сообщения о качестве."""
     stmt = select(positions)
     if scope in ("open", "stale"):
         stmt = stmt.where(positions.c.closed.is_(False))
-    if manager:
-        stmt = stmt.where(positions.c.manager == manager)
-    if dept:
-        stmt = stmt.where(positions.c.sales_dept == dept)
+    if vals(manager):
+        stmt = stmt.where(_in(positions.c.manager, manager))
+    if vals(dept):
+        stmt = stmt.where(_in(positions.c.sales_dept, dept))
     with engine.connect() as conn:
         rows = [position_view(dict(r._mapping), today) for r in conn.execute(stmt)]
         n_comments = defaultdict(int)
@@ -144,9 +156,9 @@ class Filters:
             return False
         if self.customer and self.customer not in str(p.get("customer") or "").lower():
             return False
-        if self.line and (p.get("line") or "-") != self.line:
+        if self.line and (p.get("line") or "-") not in vals(self.line):
             return False
-        if self.stage and stage_group(p.get("stage")) not in self.stage.split(","):
+        if self.stage and stage_group(p.get("stage")) not in vals(self.stage, codes=True):
             return False
         if self.color and (p.get("color") or "none") not in self.color.split(","):
             return False
@@ -158,7 +170,7 @@ class Filters:
         if self.shift_min is not None and (p.get("shift_days") or 0) < self.shift_min:
             return False
         if self.reject:
-            codes = self.reject.lstrip("!").split(",")
+            codes = vals(self.reject.lstrip("!"), codes=True)
             if ((p.get("reject_code") or "-").upper() in codes) == self.reject.startswith("!"):
                 return False
         f = self.flags
@@ -360,8 +372,8 @@ def recent_changes(engine: Engine, days: int = 7, manager: str = "", limit: int 
             .join(positions, (positions.c.order_no == change_log.c.order_no) & (positions.c.pos == change_log.c.pos))
             .where(change_log.c.at >= since)
             .order_by(desc(change_log.c.at), desc(change_log.c.id)).limit(limit))
-    if manager:
-        stmt = stmt.where(positions.c.manager == manager)
+    if vals(manager):
+        stmt = stmt.where(_in(positions.c.manager, manager))
     with engine.connect() as conn:
         out = [_row(r) for r in conn.execute(stmt)]
     for c in out:
@@ -414,12 +426,12 @@ def day_plan(engine: Engine, day: date, *, manager: str = "", dept: str = "", li
     else:
         cond = or_(positions.c.plan_end_date == day, ship_col == day, (ship_col.is_(None)) & (inv_col == day))
     stmt = select(positions).where(cond)
-    if manager:
-        stmt = stmt.where(positions.c.manager == manager)
-    if dept:
-        stmt = stmt.where(positions.c.sales_dept == dept)
-    if line:
-        stmt = stmt.where(positions.c.line == line)
+    if vals(manager):
+        stmt = stmt.where(_in(positions.c.manager, manager))
+    if vals(dept):
+        stmt = stmt.where(_in(positions.c.sales_dept, dept))
+    if vals(line):
+        stmt = stmt.where(_in(positions.c.line, line))
     with engine.connect() as conn:
         rows = [position_view(dict(r._mapping), today) for r in conn.execute(stmt)]
         qmap = defaultdict(list)
@@ -483,10 +495,10 @@ def dispatcher_summary(engine: Engine, *, decade: str = "", manager: str = "", d
                    positions.c.segments_total, positions.c.segments_produced)
             .select_from(dispatcher.outerjoin(positions, (positions.c.order_no == dispatcher.c.order_no)
                                               & (positions.c.pos == dispatcher.c.pos))))
-    if manager:
-        stmt = stmt.where(positions.c.manager == manager)
-    if dept:
-        stmt = stmt.where(positions.c.sales_dept == dept)
+    if vals(manager):
+        stmt = stmt.where(_in(positions.c.manager, manager))
+    if vals(dept):
+        stmt = stmt.where(_in(positions.c.sales_dept, dept))
     with engine.connect() as conn:
         rows = [_row(r) for r in conn.execute(stmt)]
     for r in rows:

@@ -19,6 +19,70 @@
     return d;
   }
 
+  // ---------- выбор нескольких значений ----------
+  // Скрытое поле с прежним id хранит выбор через «|» (остальной код читает и пишет .value как раньше),
+  // рядом — кнопка со сводкой («Все», одно значение, «N выбрано») и список с поиском и галками.
+  const MS = {};
+  function multiSelect(input) {
+    const allLabel = input.dataset.multi || 'Все';
+    const box = document.createElement('span');
+    box.className = 'ms';
+    box.innerHTML = `<button type="button" class="ms-btn" aria-haspopup="listbox"></button>
+      <div class="ms-pop" hidden><input type="search" class="ms-search" placeholder="Найти…" aria-label="Найти в списке">
+      <div class="ms-list" role="listbox" aria-multiselectable="true"></div>
+      <div class="ms-acts"><button type="button" class="linkish-btn ms-clear">${esc(allLabel)}</button><span class="ms-n"></span></div></div>`;
+    input.after(box);
+    const btn = box.querySelector('.ms-btn'), pop = box.querySelector('.ms-pop'), list = box.querySelector('.ms-list'),
+      search = box.querySelector('.ms-search');
+    let options = [];
+    const selected = () => (input.value ? input.value.split('|') : []);
+    const nameOf = v => options.find(o => o.value === v)?.label || v;
+    function label() {
+      const s = selected();
+      btn.textContent = !s.length ? allLabel : s.length === 1 ? nameOf(s[0]) : `${nameOf(s[0])} и ещё ${s.length - 1}`;
+      btn.title = s.length ? s.map(nameOf).join('\n') : allLabel;
+      btn.classList.toggle('active-filter', s.length > 0);
+      box.querySelector('.ms-n').textContent = s.length ? `выбрано: ${s.length}` : '';
+    }
+    function draw() {
+      const q = search.value.trim().toLowerCase(), s = new Set(selected());
+      const shown = options.filter(o => !q || o.label.toLowerCase().includes(q));
+      list.innerHTML = shown.map(o => `<label class="check"><input type="checkbox" value="${esc(o.value)}"${s.has(o.value) ? ' checked' : ''}> ${esc(o.label)}</label>`).join('')
+        || '<div class="muted">Ничего не найдено</div>';
+    }
+    function set(values) {
+      input.value = values.join('|');
+      label();
+      input.dispatchEvent(new Event('change'));
+    }
+    list.addEventListener('change', e => {
+      const s = new Set(selected());
+      if (e.target.checked) s.add(e.target.value); else s.delete(e.target.value);
+      // порядок — как в списке; значения, которых в списке нет (из старой ссылки), сохраняются в конце
+      set([...options.map(o => o.value).filter(v => s.has(v)), ...[...s].filter(v => !options.some(o => o.value === v))]);
+    });
+    box.querySelector('.ms-clear').addEventListener('click', () => { set([]); draw(); });
+    search.addEventListener('input', draw);
+    const close = () => { pop.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
+    btn.addEventListener('click', () => {
+      const open = pop.hidden;
+      document.querySelectorAll('.ms-pop').forEach(p => { p.hidden = true; });
+      pop.hidden = !open;
+      btn.setAttribute('aria-expanded', String(open));
+      if (open) { search.value = ''; draw(); search.focus(); }
+    });
+    document.addEventListener('click', e => { if (!box.contains(e.target)) close(); });
+    box.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close(); btn.focus(); } });
+    MS[input.id] = { setOptions(opts) { options = opts; label(); if (!pop.hidden) draw(); }, refresh() { label(); if (!pop.hidden) draw(); } };
+    label();
+  }
+  document.querySelectorAll('input[data-multi]').forEach(multiSelect);
+  const refreshMulti = () => Object.values(MS).forEach(m => m.refresh());
+  const STAGE_OPTIONS = [['not_made', 'Не произведено'], ['in_prod', 'В производстве'], ['made', 'Произведено'], ['stock', 'На складе'],
+    ['ready', 'Готово к отгрузке'], ['transit', 'В пути'], ['shipped', 'Отгружено'], ['none', 'Нет в отчёте по отрезкам']]
+    .map(([value, label]) => ({ value, label }));
+  MS.fStage.setOptions(STAGE_OPTIONS);
+
   // ---------- вкладки ----------
   document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
     document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x === b));
@@ -35,18 +99,15 @@
       sel.innerHTML = '<option value="">Все</option>' + items.map(v => `<option>${esc(v)}</option>`).join('');
       sel.value = items.includes(saved) ? saved : '';
     };
-    fill($('#manager'), state.meta.managers, store.get('manager'));
-    fill($('#dept'), state.meta.depts, store.get('dept'));
+    const opts = items => items.map(v => ({ value: v, label: v }));
+    if (!$('#manager').value) $('#manager').value = store.get('manager');
+    if (!$('#dept').value) $('#dept').value = store.get('dept');
+    MS.manager.setOptions(opts(state.meta.managers));
+    MS.dept.setOptions(opts(state.meta.depts));
     fill($('#dayLine'), state.meta.lines || [], '');
-    const line = $('#fLine').value;  // справочники перечитываются после загрузки — выбор не теряем
-    $('#fLine').innerHTML = '<option value="">Все</option><option value="-">Не в плане производства</option>'
-      + (state.meta.lines || []).map(v => `<option>${esc(v)}</option>`).join('');
-    $('#fLine').value = line;
-    const rej = $('#fReject').value;
-    $('#fReject').innerHTML = '<option value="">Любая</option>'
-      + (state.meta.rejects || []).map(r => `<option value="${esc(r.code)}">${esc(r.code)} — ${esc(r.text || '')}</option>`).join('')
-      + '<option value="-">(пусто) — принят в производство</option><option value="!Z6,Z7">Кроме прогноза и бизнес-плана (Z6, Z7)</option>';
-    $('#fReject').value = rej;
+    MS.fLine.setOptions([{ value: '-', label: 'Не в плане производства' }, ...opts(state.meta.lines || [])]);
+    MS.fReject.setOptions([...(state.meta.rejects || []).map(r => ({ value: r.code, label: `${r.code} — ${r.text || ''}` })),
+      { value: '-', label: '(пусто) — принят в производство' }]);
     $('#customerList').innerHTML = (state.meta.customers || []).map(v => `<option value="${esc(v)}">`).join('');
     const loadTab = document.querySelector('.tabs button[data-tab="load"]');
     if (loadTab) loadTab.hidden = state.meta.can_upload === false;
@@ -134,7 +195,7 @@
   }
   // Словесное описание отбора — в первую строку выгрузки Excel
   function describeFilters() {
-    const text = sel => { const el = $(sel); return el.tagName === 'SELECT' ? el.options[el.selectedIndex]?.text : el.value; };
+    const text = sel => { const el = $(sel); return el.tagName === 'SELECT' ? el.options[el.selectedIndex]?.text : el.value.split('|').join(', '); };
     const parts = [state.view === 'orders' ? 'Заказы' : 'Позиции', text('#scope')];
     for (const [sel, name] of [['#manager', 'менеджер'], ['#dept', 'отдел'], ['#search', 'поиск'], ['#fCustomer', 'клиент'],
       ['#fLine', 'линия'], ['#fStage', 'этап'], ['#fShift', 'смещение от, дн.'], ['#fReject', 'причина откл.']]) if ($(sel).value) parts.push(`${name}: ${text(sel)}`);
@@ -165,24 +226,29 @@
     const s = h.toString();
     history.replaceState(null, '', location.pathname + (s ? '?' + s : ''));
     store.set('lastView', s);  // открыл раздел без ссылки — вернётся его последний отбор
+    savePrefs({ last: s });
   }
   function readUrl() {
-    // старые ссылки с #… тоже открываются
-    const h = new URLSearchParams(location.search.slice(1) || location.hash.slice(1) || store.get('lastView'));
+    // ссылка (старые — с #…) → последний отбор сотрудника → его заказы по логину SAP → последний отбор в этом браузере
+    const p = state.prefs || {};
+    const h = new URLSearchParams(location.search.slice(1) || location.hash.slice(1) || p.last
+      || (p.sap_login ? 'manager=' + encodeURIComponent(p.sap_login) : '') || store.get('lastView'));
     if (![...h.keys()].length) return;
-    for (const [k, sel] of Object.entries(URL_FIELDS)) if (h.has(k)) $(sel).value = h.get(k);
+    for (const [k, sel] of Object.entries(URL_FIELDS)) if (h.has(k)) $(sel).value = ['stage', 'reject'].includes(k) ? h.get(k).replace(/,/g, '|') : h.get(k);
     const flags = (h.get('flags') || '').split(',');
     flagInputs().forEach(i => { i.checked = flags.includes(i.dataset.flag); });
     const tile = h.get('tile') || '';
     state.overdue = tile === 'late';
     state.color = tile === 'late' ? '' : tile;
     state.view = h.get('view') === 'positions' ? 'positions' : 'orders';
+    refreshMulti();
     if (state.view === 'orders') state.sort = h.get('sort') || ''; else state.posSort = h.get('sort') || '';
   }
   // Подсветка заданных фильтров, число их на кнопке «Отбор», видимость полей своего периода
   function markFilters() {
     let n = 0;
     for (const el of document.querySelectorAll('#filters select, #filters input:not([type=checkbox])')) {
+      if (el.closest('.ms')) continue;
       const on = !!el.value && !el.closest('.period[hidden]');
       el.classList.toggle('active-filter', on);
       n += on && !el.closest('.period') ? 1 : 0;
@@ -334,11 +400,12 @@
   $('#dept').addEventListener('change', e => { store.set('dept', e.target.value); reload(); });
   $('#search').addEventListener('input', reload);
   $('#scope').addEventListener('change', reload);
-  document.querySelectorAll('#filters select, #filters input').forEach(el => el.addEventListener(el.type === 'text' || el.type === 'number' || el.type === 'search' || el.id === 'fCustomer' ? 'input' : 'change', reload));
+  [...document.querySelectorAll('#filters select, #filters input')].filter(el => !el.closest('.ms')).forEach(el => el.addEventListener(el.type === 'text' || el.type === 'number' || el.type === 'search' || el.id === 'fCustomer' ? 'input' : 'change', reload));
   $('#fReset').addEventListener('click', () => {
     document.querySelectorAll('#filters select, #filters input:not([type=checkbox])').forEach(el => { el.value = ''; });
     flagInputs().forEach(i => { i.checked = false; });
     state.color = ''; state.overdue = false;
+    refreshMulti();
     reload();
   });
   $('#filtersToggle').addEventListener('click', () => {
@@ -355,45 +422,113 @@
     if (state.view === 'orders') { if (state.overdue) p.overdue = 'true'; else if (state.color) p.color = state.color; }
     location.href = 'api/export.xlsx?' + new URLSearchParams(p);
   });
-  // «Мои отборы»: именованные отборы в этом браузере (пресеты пилота: «мои просрочки», «мой отдел»)
-  const savedViews = () => { try { return JSON.parse(store.get('views') || '[]'); } catch { return []; } };
+  // ---------- преднастройки сотрудника: у каждого сотрудника портала свои (хранятся в SalesVisor) ----------
+  // «Мои отборы» (пресеты пилота: «мои просрочки», «мой отдел»), последний отбор, свой логин SAP для «Мои заказы».
+  let prefsTimer = null, prefsPending = {};
+  function savePrefs(part) {
+    if (!state.prefs) return;  // преднастройки не загрузились — не затираем их на сервере
+    Object.assign(state.prefs, part);
+    Object.assign(prefsPending, part);
+    clearTimeout(prefsTimer);
+    prefsTimer = setTimeout(() => {
+      const body = prefsPending;
+      prefsPending = {};
+      api('api/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .catch(err => console.warn('преднастройки не сохранены:', err.message));
+    }, 800);
+  }
+  async function loadPrefs() {
+    try { state.prefs = await api('api/prefs'); } catch { state.prefs = null; return; }
+    // отборы, сохранённые раньше в этом браузере, переезжают к сотруднику один раз
+    let local = [];
+    try { local = JSON.parse(store.get('views') || '[]'); } catch { /* нет */ }
+    if (local.length && !state.prefs.views.length) {
+      savePrefs({ views: local.map(x => ({ name: String(x.name).slice(0, 60), query: x.query ?? x.hash ?? '' })).slice(-30) });
+      store.set('views', '');
+    }
+    fillSavedViews();
+    fillMe();
+  }
+  const savedViews = () => (state.prefs ? state.prefs.views || [] : []);
   function fillSavedViews() {
     const list = savedViews();
     $('#savedViews').innerHTML = '<option value="">Мои отборы…</option>'
       + list.map((x, i) => `<option value="${i}">${esc(x.name)}</option>`).join('')
       + (list.length ? '<option value="del">Удалить отбор…</option>' : '');
+    $('#savedViews').disabled = $('#saveView').disabled = !state.prefs;
   }
   $('#saveView').addEventListener('click', () => {
     const name = (window.prompt('Название отбора, например «Мои просрочки»:') || '').trim().slice(0, 60);
     if (!name) return;
     const list = savedViews().filter(x => x.name !== name);
     list.push({ name, query: location.search.slice(1) });
-    store.set('views', JSON.stringify(list.slice(-30)));
+    savePrefs({ views: list.slice(-30) });
     fillSavedViews();
   });
+  // отбор целиком: сначала всё сбросить, затем применить строку адреса
+  function applyQuery(q) {
+    document.querySelectorAll('#filters select, #filters input:not([type=checkbox])').forEach(el => { el.value = ''; });
+    ['#search', '#manager', '#dept'].forEach(id => { $(id).value = ''; });
+    flagInputs().forEach(i => { i.checked = false; });
+    $('#scope').value = 'open';
+    state.sort = ''; state.posSort = ''; state.color = ''; state.overdue = false;
+    history.replaceState(null, '', location.pathname + (q ? '?' + q : ''));
+    readUrl();
+    setView(state.view);
+    loadOrders().catch(showErr);
+  }
   $('#savedViews').addEventListener('change', e => {
     const v = e.target.value;
     e.target.value = '';
     if (v === 'del') {
       const name = (window.prompt('Какой отбор удалить? Название:\n' + savedViews().map(x => x.name).join('\n')) || '').trim();
-      store.set('views', JSON.stringify(savedViews().filter(x => x.name !== name)));
+      savePrefs({ views: savedViews().filter(x => x.name !== name) });
       fillSavedViews();
       return;
     }
     const x = savedViews()[+v];
-    if (!x) return;
-    // отбор целиком из сохранённого: сначала всё сбросить, затем применить его адрес
-    document.querySelectorAll('#filters select, #filters input:not([type=checkbox])').forEach(el => { el.value = ''; });
-    ['#search', '#manager', '#dept'].forEach(id => { $(id).value = ''; });
-    $('#scope').value = 'open';
-    state.sort = ''; state.posSort = ''; state.color = ''; state.overdue = false;
-    const q = x.query ?? x.hash ?? '';
-    history.replaceState(null, '', location.pathname + (q ? '?' + q : ''));
-    readUrl();
-    setView(state.view);
+    if (x) applyQuery(x.query || '');
+  });
+
+  // «Мои заказы»: менеджер = свой логин SAP (поле «Создал»). Логин сотрудник выбирает один раз,
+  // подсказка — по фамилии из портала (Иванова → IVANOVA)
+  const TRANSLIT = { а: 'A', б: 'B', в: 'V', г: 'G', д: 'D', е: 'E', ё: 'E', ж: 'ZH', з: 'Z', и: 'I', й: 'I', к: 'K', л: 'L', м: 'M',
+    н: 'N', о: 'O', п: 'P', р: 'R', с: 'S', т: 'T', у: 'U', ф: 'F', х: 'KH', ц: 'TS', ч: 'CH', ш: 'SH', щ: 'SHCH', ъ: '', ы: 'Y',
+    ь: '', э: 'E', ю: 'IU', я: 'IA' };
+  function guessLogin() {
+    const surname = (state.meta.portal_user || '').trim().split(/\s+/)[0].toLowerCase();
+    const lat = [...surname].map(c => TRANSLIT[c] ?? c.toUpperCase()).join('');
+    const managers = state.meta.managers || [];
+    return managers.find(m => m === lat) || managers.find(m => lat && m.startsWith(lat.slice(0, 5))) || '';
+  }
+  function fillMe() {
+    const login = state.prefs?.sap_login || '';
+    $('#myOrders').title = login ? `Заказы, где в SAP «Создал» = ${login}` : 'Выберите свой логин в SAP — кнопка будет открывать ваши заказы';
+    $('#meLogin').innerHTML = '<option value="">— не менеджер —</option>'
+      + (state.meta.managers || []).map(m => `<option>${esc(m)}</option>`).join('');
+    $('#meLogin').value = login || guessLogin();
+    $('#myOrders').disabled = $('#meSet').disabled = !state.prefs;
+  }
+  function openMe() {
+    $('#mePop').hidden = false;
+    $('#meLogin').focus();
+  }
+  $('#myOrders').addEventListener('click', () => {
+    const login = state.prefs?.sap_login;
+    if (!login) { openMe(); return; }
+    $('#manager').value = login;
+    refreshMulti();
+    store.set('manager', login);
     loadOrders().catch(showErr);
   });
-  fillSavedViews();
+  $('#meSet').addEventListener('click', () => { $('#mePop').hidden ? openMe() : ($('#mePop').hidden = true); });
+  $('#meSave').addEventListener('click', () => {
+    savePrefs({ sap_login: $('#meLogin').value });
+    $('#mePop').hidden = true;
+    fillMe();
+    if ($('#meLogin').value) $('#myOrders').click();
+  });
+  document.addEventListener('click', e => { if (!e.target.closest('.me')) $('#mePop').hidden = true; });
 
   $('#copyLink').addEventListener('click', async () => {
     const b = $('#copyLink'), was = b.textContent;
@@ -811,5 +946,5 @@
     $('#empty').textContent = 'Не удалось загрузить данные: ' + err.message;
   }
 
-  loadMeta().then(() => { readUrl(); setView(state.view); return loadOrders(); }).catch(showErr);
+  loadMeta().then(loadPrefs).then(() => { readUrl(); setView(state.view); return loadOrders(); }).catch(showErr);
 })();

@@ -27,8 +27,8 @@
           <button data-view="orders" class="on" title="Строка — заказ, итог по его позициям">Заказы</button>
           <button data-view="positions" title="Строка — позиция: изделие, линия, этап, сроки">Позиции</button>
         </div>
-        <label>Менеджер <select id="manager"><option value="">Все</option></select></label>
-        <label>Отдел <select id="dept"><option value="">Все</option></select></label>
+        <span class="field">Менеджер <input type="hidden" id="manager" data-multi="Все"></span>
+        <span class="field">Отдел <input type="hidden" id="dept" data-multi="Все"></span>
         <input id="search" type="search" placeholder="Заказ, клиент, менеджер, изделие">
         <label>Показать <select id="scope">
           <option value="open">В работе</option>
@@ -37,7 +37,14 @@
         </select></label>
         <button class="btn secondary" id="filtersToggle" aria-expanded="true">Отбор <b id="filtersCount" hidden></b></button>
         <span class="toolbar-end">
-          <select id="savedViews" title="Сохранённые отборы — хранятся в этом браузере"><option value="">Мои отборы…</option></select>
+          <span class="me">
+            <button class="btn secondary" id="myOrders">Мои заказы</button><button class="btn secondary me-set" id="meSet" title="Мой логин в SAP" aria-label="Мой логин в SAP">▾</button>
+            <div class="ms-pop me-pop" id="mePop" hidden>
+              <label>Ваш логин в SAP — поле «Создал» отчёта по отрезкам <select id="meLogin"></select></label>
+              <div class="ms-acts"><span class="muted">Хранится за вашей учётной записью портала</span><button class="btn" id="meSave">Запомнить</button></div>
+            </div>
+          </span>
+          <select id="savedViews" title="Сохранённые отборы — хранятся за вашей учётной записью портала"><option value="">Мои отборы…</option></select>
           <button class="btn secondary" id="saveView" title="Запомнить текущий отбор под своим названием">Сохранить отбор</button>
           <button class="btn secondary" id="copyLink" title="Скопировать ссылку на этот отбор — коллега с доступом откроет то же самое">Ссылка на отбор</button>
           <button class="btn" id="exportBtn" title="Все строки текущего отбора в том же порядке, с фильтрами в шапке">Скачать в Excel</button>
@@ -46,18 +53,8 @@
       <div class="filters" id="filters">
         <label>Клиент <input id="fCustomer" list="customerList" placeholder="часть названия" autocomplete="off"></label>
         <datalist id="customerList"></datalist>
-        <label>Линия <select id="fLine"><option value="">Все</option><option value="-">Не в плане производства</option></select></label>
-        <label>Этап <select id="fStage">
-          <option value="">Любой</option>
-          <option value="not_made,in_prod">Не произведено (включая «в производстве»)</option>
-          <option value="not_made">Не произведено</option>
-          <option value="in_prod">В производстве</option>
-          <option value="made,stock">Произведено, на складе</option>
-          <option value="ready">Готово к отгрузке</option>
-          <option value="transit">В пути</option>
-          <option value="shipped">Отгружено</option>
-          <option value="none">Нет в отчёте по отрезкам</option>
-        </select></label>
+        <span class="field">Линия <input type="hidden" id="fLine" data-multi="Все"></span>
+        <span class="field">Этап <input type="hidden" id="fStage" data-multi="Любой"></span>
         <label title="Текущая декада светофора, а если её нет — требуемая дата поставки">Срок сейчас <select id="fDue" data-period="due">
           <option value="">Любой</option>
           <option value="past">Прошёл</option>
@@ -77,9 +74,7 @@
         </select></label>
         <span class="period" id="fFirstPeriod" hidden><input type="date" id="fFirstFrom" aria-label="Первая дата с"> — <input type="date" id="fFirstTo" aria-label="Первая дата по"></span>
         <label>Смещение от <input id="fShift" type="number" min="0" step="10" placeholder="0"> дн.</label>
-        <label title="Причина отклонения SAP по регламенту: Z4 — готов к производству, Z6 — прогноз, Z7 — бизнес-план, пусто — принят в производство">Причина откл. <select id="fReject">
-          <option value="">Любая</option>
-        </select></label>
+        <span class="field" title="Причина отклонения SAP по регламенту: Z4 — готов к производству, Z6 — прогноз, Z7 — бизнес-план, пусто — принят в производство">Причина откл. <input type="hidden" id="fReject" data-multi="Любая"></span>
         <span class="flags-group">
           <label class="check"><input type="checkbox" data-flag="overdue"> просрочено</label>
           <label class="check"><input type="checkbox" data-flag="quality"> несоответствия</label>

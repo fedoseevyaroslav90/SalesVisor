@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import re
 import zipfile
 from pathlib import Path
@@ -14,13 +15,13 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from sqlalchemy import delete, insert
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.engine import Engine
 
 from . import export, queries
 from .config import Settings, get_settings
 from .bitrix import Bitrix, live_info
-from .db import bitrix_links, comments, make_engine
+from .db import bitrix_links, comments, make_engine, user_prefs
 from .ingest import LoadBusy, load_file, load_lock, sniff_source
 from .metabase import MetabaseError
 from .sync import SyncError, run_sync
@@ -43,6 +44,18 @@ class BitrixLinkIn(BaseModel):
     task_id: str = Field(default="", max_length=20)
     deal_id: str = Field(default="", max_length=20)
     author: str = Field(default="", max_length=100)
+
+
+class SavedView(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    query: str = Field(default="", max_length=2000)
+
+
+class PrefsIn(BaseModel):
+    """Преднастройки сотрудника: поле, которого нет в запросе, не меняется."""
+    views: list[SavedView] | None = Field(default=None, max_length=30)   # «Мои отборы»
+    last: str | None = Field(default=None, max_length=2000)             # последний отбор (строка адреса)
+    sap_login: str | None = Field(default=None, max_length=50)          # свой логин SAP («Создал») — «Мои заказы»
 
 
 def _id_or_none(v: str) -> str | None:
@@ -100,6 +113,42 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
     @app.get("/api/me")
     def api_me(request: Request):
         return {"user": user_of(request), "alias": request.headers.get("x-salesvisor-user", "")}
+
+    def alias_of(request: Request) -> str:
+        """Чьи преднастройки: алиас сотрудника портала; без портала (локальный запуск) — «local»."""
+        alias = request.headers.get("x-salesvisor-user", "").strip()[:64]
+        if not alias and settings.portal_token:
+            raise HTTPException(400, "Портал не передал сотрудника — откройте раздел через портал «Инкаб ИИ»")
+        return alias or "local"
+
+    def prefs_of(alias: str) -> dict:
+        with engine.connect() as conn:
+            row = conn.execute(select(user_prefs.c.data).where(user_prefs.c.alias == alias)).first()
+        try:
+            return json.loads(row[0]) if row else {}
+        except ValueError:
+            return {}
+
+    @app.get("/api/prefs")
+    def api_prefs(request: Request):
+        """Преднастройки того, кто открыл раздел (у каждого сотрудника портала — свои)."""
+        alias = alias_of(request)
+        p = prefs_of(alias)
+        return {"alias": alias, "views": p.get("views", []), "last": p.get("last", ""), "sap_login": p.get("sap_login", "")}
+
+    @app.put("/api/prefs")
+    def api_prefs_put(body: PrefsIn, request: Request):
+        alias = alias_of(request)
+        p = prefs_of(alias)
+        for k, v in body.model_dump(exclude_none=True).items():
+            p[k] = v
+        data = json.dumps(p, ensure_ascii=False)
+        person = user_of(request)[:200]
+        with engine.begin() as conn:
+            if not conn.execute(update(user_prefs).where(user_prefs.c.alias == alias)
+                                .values(data=data, person=person, updated_at=func.now())).rowcount:
+                conn.execute(insert(user_prefs).values(alias=alias, person=person, data=data))
+        return {"ok": True}
 
     @app.get("/api/meta")
     def api_meta(request: Request):
