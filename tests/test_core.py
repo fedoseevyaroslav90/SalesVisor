@@ -519,8 +519,32 @@ def test_status_flags_are_not_cumulative():
     load_segments(engine, segs, "d1")
     ps = {p["pos"]: p for p in order_card(engine, "1200000091", today=date(2026, 9, 30))["positions"]}
     assert (ps["10"]["stage"], ps["10"]["closed"], ps["10"]["overdue"]) == ("В пути", True, False)
-    assert (ps["20"]["stage"], ps["20"]["closed"], ps["20"]["overdue"]) == ("Готов к отгрузке", False, True)
+    # выпущена (отгружено + готово) — срок прошёл, но это не долг
+    assert (ps["20"]["stage"], ps["20"]["closed"], ps["20"]["overdue"], ps["20"]["released"]) == ("Готов к отгрузке", False, False, True)
     assert (ps["30"]["stage"], ps["30"]["closed"]) == ("На складе", False)
-    assert (ps["40"]["stage"], ps["40"]["closed"]) == ("В производстве 1/2", False)
+    assert (ps["40"]["stage"], ps["40"]["closed"], ps["40"]["overdue"]) == ("В производстве 1/2", False, True)
     o = list_orders(engine, scope="all", today=date(2026, 9, 30))[0]
     assert (o["segments_ready"], o["segments_total"], o["ready_positions"]) == (4, 6, 2)
+
+
+def test_released_is_not_debt():
+    """Выпущенная позиция (все отрезки произведены, лежит на складе) — не долг, даже если срок прошёл и SAP держит
+    «не готов к отгрузке»; опоздание считается до даты выпуска. Не выпущенная к сроку — просрочена."""
+    engine = make_engine("sqlite:///:memory:")
+    Y, R = "@08@", "@0A@"
+    req = "10 августа, 2026"
+    stock = seg_row("1200000092", "10", "1", req, produced=Y, stock=Y, ready=R)
+    stock["Факт. дата поставки"] = "29 сентября, 2026"
+    segs = pd.DataFrame([stock,
+                         seg_row("1200000092", "20", "1", req, produced=Y, stock=Y, ready=R),
+                         seg_row("1200000092", "20", "2", req)])
+    load_segments(engine, segs, "d1")
+    load_svetofor(engine, pd.DataFrame([svet_row("1200000092", "10", "1Д08", "1Д08", "0", "green"),
+                                        svet_row("1200000092", "20", "1Д08", "1Д08", "0", "green")]), "d1")
+    today = date(2026, 9, 30)
+    ps = {p["pos"]: p for p in order_card(engine, "1200000092", today=today)["positions"]}
+    assert (ps["10"]["released"], ps["10"]["overdue"], ps["10"]["release_date"]) == (True, False, "2026-09-29")
+    assert ps["10"]["days_late"] == 50                     # 10.08 → 29.09, дальше не растёт
+    assert (ps["20"]["released"], ps["20"]["overdue"], ps["20"]["days_late"]) == (False, True, 51)
+    o = list_orders(engine, today=today)[0]
+    assert (o["overdue"], o["made_positions"], o["ready_positions"], o["positions"]) == (1, 1, 0, 2)

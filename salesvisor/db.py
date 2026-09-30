@@ -59,6 +59,7 @@ positions = Table(
     # или отфактуровано
     Column("segments_ready_plus", Integer),
     Column("segments_done", Integer),
+    Column("segments_made", Integer),     # произведено и дальше — выпущено из производства
     Column("last_fact_ship_date", Date),
     Column("length_plan", Float),
     Column("unit", String(10)),

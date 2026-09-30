@@ -57,6 +57,7 @@ POSITION_COLUMNS = [
     ("Срок сейчас", 12, lambda p: p.get("due_date")),
     ("Смещение, дн.", 10, lambda p: p.get("shift_days")),
     ("Просрочено", 10, lambda p: "да" if p.get("overdue") else ""),
+    ("Выпущено", 11, lambda p: p.get("release_date") or ("да" if p.get("released") else "")),
     ("Треб. дата поставки", 12, lambda p: p.get("required_date")),
     ("План отгрузки", 12, lambda p: p.get("plan_ship_date") or p.get("invoice_plan_date")),
     ("Линия", 12, lambda p: p.get("line")),

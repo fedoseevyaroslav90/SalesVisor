@@ -196,7 +196,7 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
                 "bitrix_task": p.parse_bitrix_task(raw_task),
                 "segments_total": 0, "segments_produced": 0, "segments_stock": 0, "segments_ready": 0,
                 "segments_in_transit": 0, "segments_shipped": 0, "segments_invoiced": 0,
-                "segments_ready_plus": 0, "segments_done": 0, "_min_level": 6, "_started": 0,
+                "segments_ready_plus": 0, "segments_done": 0, "segments_made": 0, "_min_level": 6,
                 "length_plan": 0.0, "amount_rub": 0.0, "mp_rub": 0.0 if mp_col else None,
                 "mz_rub": 0.0 if mz_col else None, "last_fact_ship_date": None,
             }
@@ -206,7 +206,7 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
         level = seg_level(seg)
         a["segments_ready_plus"] += int(level >= READY_LEVEL)
         a["segments_done"] += int(level >= DONE_LEVEL)
-        a["_started"] += int(level >= 1)
+        a["segments_made"] += int(level >= 1)
         a["_min_level"] = min(a["_min_level"], level)
         a["length_plan"] += seg["length"] or 0
         if amount_col:
@@ -220,7 +220,7 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
             a["last_fact_ship_date"] = seg["fact_ship_date"]
 
     for a in agg.values():
-        a["stage"] = stage_of(a, a.pop("_min_level"), a.pop("_started"))
+        a["stage"] = stage_of(a, a.pop("_min_level"))
         total = a["segments_total"]
         # закрыта, когда все отрезки ушли с завода (в пути, отгружены) или отфактурированы
         a["closed"] = total > 0 and a["segments_done"] == total
@@ -238,13 +238,14 @@ def _money_col(columns, prefix: str) -> str | None:
     return cands[0] if cands else None
 
 
-def stage_of(a: dict, min_level: int, started: int) -> str:
+def stage_of(a: dict, min_level: int) -> str:
     """Этап позиции — шаг самого отстающего отрезка; часть отрезков ещё не произведена — «В производстве k/n»."""
     total = a.get("segments_total") or 0
     if not total:
         return "Нет отрезков"
-    if min_level == 0 and started:
-        return f"В производстве {started}/{total}"
+    made = a.get("segments_made") or 0
+    if min_level == 0 and made:
+        return f"В производстве {made}/{total}"
     return LEVELS[min_level]
 
 

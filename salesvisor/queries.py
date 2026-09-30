@@ -46,23 +46,38 @@ def due_date(pos: dict):
 STALE_DAYS = 180
 
 
+def released(pos: dict) -> bool:
+    """Выпущена: все отрезки произведены (на складе, готовы, в пути, отгружены — тоже). Флаги SAP не накопительные,
+    поэтому считаем по segments_made; до перезагрузки отрезков — по флагу «Произведен» (он стоит у всех шагов дальше)."""
+    total = pos.get("segments_total") or 0
+    made = pos.get("segments_made")
+    return bool(total) and (made if made is not None else pos.get("segments_produced") or 0) >= total
+
+
 def position_view(pos: dict, today: date) -> dict:
     due = due_date(pos)
     due_d = date.fromisoformat(due) if isinstance(due, str) else due
     has_segments = bool(pos.get("segments_total"))
-    # Без строк в отчёте по отрезкам мы не знаем, отгружена ли позиция, поэтому просрочкой не считаем
-    overdue = bool(has_segments and due_d and due_d < today and not pos.get("closed"))
+    # Долг (просрочено) — срок сейчас прошёл, а позиция не выпущена. Выпущенная и ждущая отгрузки — не долг.
+    # Без строк в отчёте по отрезкам мы не знаем, выпущена ли позиция, поэтому просрочкой не считаем
+    rel = released(pos) and not pos.get("closed")
+    overdue = bool(has_segments and due_d and due_d < today and not pos.get("closed") and not rel)
+    fact = pos.get("last_fact_ship_date")   # у выпущенных — дата поступления на склад (последний отрезок)
+    fact_d = date.fromisoformat(fact) if isinstance(fact, str) else fact
     # «Хвосты»: срок прошёл больше полугода назад, а позиция так и висит открытой
     stale = bool(due_d and (today - due_d).days > STALE_DAYS and not pos.get("closed"))
-    # Опоздание к обещанию клиенту: max(срок сейчас, сегодня) − первая дата клиента (конец первой декады).
+    # Опоздание к обещанию клиенту: max(срок сейчас, сегодня) − первая дата клиента (конец первой декады);
+    # у выпущенной — дата выпуска − первая дата (дальше не растёт).
     # Приоритет — МП × дни опоздания («Критичные заказы», 10–11.06.2026): чем дороже и дольше, тем выше
     first = pos.get("first_decade_end")
     first_d = date.fromisoformat(first) if isinstance(first, str) else first
-    late = max(((max(due_d, today) if due_d else today) - first_d).days, 0) if first_d and not pos.get("closed") else 0
+    end = fact_d if rel and fact_d else max(due_d, today) if due_d else today
+    late = max((end - first_d).days, 0) if first_d and not pos.get("closed") else 0
     # регламент причин отклонения: Z6 (прогноз) не должно оставаться, когда декада срока уже началась
-    z6_late = ((pos.get("reject_code") or "").upper() == "Z6" and not pos.get("closed") and bool(due_d)
+    z6_late = ((pos.get("reject_code") or "").upper() == "Z6" and not pos.get("closed") and not rel and bool(due_d)
                and due_d.replace(day=1 if due_d.day <= 10 else 11 if due_d.day <= 20 else 21) <= today)
     return {**{k: _iso(v) for k, v in pos.items()}, "due_date": _iso(due_d), "overdue": overdue, "stale": stale,
+            "released": rel, "release_date": _iso(fact_d) if rel else None,
             "stage": pos.get("stage") or "Нет в отчёте по отрезкам", "days_late": late, "z6_late": z6_late,
             "priority": round((pos.get("mp_rub") or 0) * late)}
 
@@ -204,7 +219,7 @@ POSITION_FIELDS = ("order_no", "pos", "customer", "sales_dept", "manager", "prod
                    "plan_ship_date", "invoice_plan_date", "line", "plan_end_date", "plan_end_time", "stage",
                    "segments_total", "segments_ready", "overdue", "stale", "disp_decade", "disp_ready", "length_plan",
                    "unit", "amount_rub", "quality", "comments", "bitrix_task", "bitrix_deal", "reject_code", "reject_text",
-                   "mp_rub", "mz_rub", "days_late", "priority")
+                   "mp_rub", "mz_rub", "days_late", "priority", "released", "release_date")
 
 
 def _filtered_positions(engine: Engine, scope: str, manager: str, dept: str, f: Filters, today: date) -> list[dict]:
@@ -311,6 +326,8 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
             "mz_rub": sum(p.get("mz_rub") or 0 for p in ps) if any(p.get("mz_rub") is not None for p in ps) else None,
             "days_late": max(p["days_late"] for p in ps),
             "ready_positions": sum(1 for p in ps if (p.get("segments_total") or 0) and p["segments_ready"] >= p["segments_total"]),
+            # выпущено: все отрезки произведены (в том числе готовые и ушедшие)
+            "made_positions": sum(1 for p in ps if p["released"] or p.get("closed")),
             "comments": first["comments"],
             "quality": first["quality_order"],
             "lines": sorted({p["line"] for p in ps if p.get("line")}),
@@ -337,7 +354,7 @@ def _tile_match(o: dict, tile: str, today: date) -> bool:
         return o["quality"] > 0
     if tile == "soon":
         due = _date(o["nearest_due"])
-        return bool(due and today <= due <= today + timedelta(days=7) and o["segments_ready"] < o["segments_total"])
+        return bool(due and today <= due <= today + timedelta(days=7) and o["made_positions"] < o["positions"])
     return o["color"] == tile
 
 
@@ -430,8 +447,7 @@ def meta(engine: Engine) -> dict:
 
 def _produced(p: dict) -> bool:
     """Произведено: все отрезки со статусом «Произведен» или факт MES по ZPP context достиг плана."""
-    total = p.get("segments_total") or 0
-    if total and (p.get("segments_produced") or 0) >= total:
+    if released(p):
         return True
     plan, fact = p.get("plan_qty") or 0, p.get("plan_fact_qty") or 0
     return plan > 0 and fact >= plan * 0.99

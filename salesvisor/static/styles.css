@@ -146,6 +146,7 @@ textarea { width: 100%; min-height: 60px; resize: vertical; }
 .cnt.red { color: var(--overdue); }
 .cnt.yellow { color: var(--warn); }
 .late-tag { color: var(--overdue); font-weight: 600; font-size: 12px; }
+.rel-tag { color: var(--ok); font-size: 12px; white-space: nowrap; }
 .drawer-inner.wide { width: min(1700px, 100%); }  /* карточка заказа — почти во весь экран: позиции без горизонтальной прокрутки */
 .mini tr.seg td { background: #fafbfc; font-size: 12px; color: var(--muted); }
 .flags span { display: inline-block; width: 16px; text-align: center; border-radius: 3px; margin-right: 2px; font-size: 11px; background: var(--line); color: var(--muted); }

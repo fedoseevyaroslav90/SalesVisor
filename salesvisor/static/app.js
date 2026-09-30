@@ -283,13 +283,21 @@
     renderPositions();
   }
 
-  // срок наступает в ближайшие 7 дней, а отгружено ещё не всё (плитка «Мои заказы» пилота VOLS-Zakazy)
+  // выпущена, но ещё не ушла с завода — долга по выпуску нет, ждёт отгрузки
+  function relTag(p, block) {
+    if (!p.released) return '';
+    const t = `выпущено${p.release_date ? ' ' + fmt(p.release_date) : ''}`;
+    return block ? `<div class="rel-tag" title="Все отрезки произведены — долга нет, ждёт отгрузки">${t}</div>`
+      : ` <span class="rel-tag" title="Все отрезки произведены — долга нет, ждёт отгрузки">${t}</span>`;
+  }
+
+  // срок наступает в ближайшие 7 дней, а выпущено ещё не всё (плитка «Мои заказы» пилота VOLS-Zakazy)
   function soon(o) {
     if (!o.nearest_due) return false;
     const today = state.meta.today || isoDate(new Date());
     const t = new Date(today + 'T00:00');
     t.setDate(t.getDate() + 7);
-    return o.nearest_due >= today && o.nearest_due <= isoDate(t) && o.segments_ready < o.segments_total;
+    return o.nearest_due >= today && o.nearest_due <= isoDate(t) && o.made_positions < o.positions;
   }
   function tileRows(all) {
     return all.filter(o => (state.overdue ? o.overdue : true) &&
@@ -339,7 +347,7 @@
         <td>${esc(o.customer || '—')}</td>
         <td>${esc(o.sales_dept || '—')}<div class="sub">${esc(o.manager || '')}</div></td>
         <td>${o.positions} ${o.red ? `<span class="cnt red">●${o.red}</span>` : ''}${o.yellow ? `<span class="cnt yellow">●${o.yellow}</span>` : ''}
-          <div class="sub"><span class="n-ok" title="Позиций, у которых все отрезки готовы к отгрузке, в пути или отгружены">готово ${o.ready_positions}</span>${o.positions - o.ready_positions ? ` · <span class="n-bad">не готово ${o.positions - o.ready_positions}</span>` : ''}</div></td>
+          <div class="sub"><span class="n-ok" title="Позиций, у которых все отрезки готовы к отгрузке, в пути или отгружены">готово ${o.ready_positions}</span>${o.made_positions - o.ready_positions > 0 ? ` · <span title="Выпущено, но SAP не отметил «Готов к отгрузке» (на складе или произведено)">на складе ${o.made_positions - o.ready_positions}</span>` : ''}${o.positions - o.made_positions ? ` · <span class="n-bad" title="Не все отрезки произведены">не выпущено ${o.positions - o.made_positions}</span>` : ''}</div></td>
         <td>${esc(o.first_decade || '—')}</td>
         <td>${esc(o.current_decade || '—')}</td>
         <td class="num ${o.max_shift > 30 ? 'neg' : ''}">${o.max_shift == null ? '—' : o.max_shift + ' дн.'}</td>
@@ -370,7 +378,7 @@
         <td><span class="dot ${COLOR_NAME[p.color] ? p.color : ''}"></span></td>
         <td>${esc(p.product || '')}${p.quality ? ` <span class="q-tag">несоотв.: ${p.quality}</span>` : ''}</td>
         <td>${esc(p.first_decade || '—')}</td>
-        <td>${esc(p.current_decade || fmt(p.due_date))}${p.overdue ? ' <span class="late-tag">просрочено</span>' : ''}</td>
+        <td>${esc(p.current_decade || fmt(p.due_date))}${p.overdue ? ' <span class="late-tag">просрочено</span>' : ''}${relTag(p)}</td>
         <td class="num">${p.shift_days ?? '—'}</td>
         <td>${fmt(p.required_date)}</td>
         <td>${fmt(p.plan_ship_date || p.invoice_plan_date)}</td>
@@ -452,7 +460,7 @@
         <td>${esc(p.customer || '—')}</td>
         <td>${esc(p.product || '')}</td>
         <td>${esc(p.manager || '')}</td>
-        <td>${esc(p.first_decade || '—')} → ${esc(p.current_decade || fmt(p.due_date))}${p.overdue ? '<div class="late-tag">просрочено</div>' : ''}</td>
+        <td>${esc(p.first_decade || '—')} → ${esc(p.current_decade || fmt(p.due_date))}${p.overdue ? '<div class="late-tag">просрочено</div>' : ''}${relTag(p, true)}</td>
         <td class="num ${p.shift_days > 30 ? 'neg' : ''}">${p.shift_days ?? '—'}</td>
         <td>${fmt(p.plan_ship_date || p.invoice_plan_date)}</td>
         <td>${p.line ? `<b>${esc(p.line)}</b><div class="sub">${fmt(p.plan_end_date)} ${esc(p.plan_end_time || '')}</div>` : '<span class="muted">—</span>'}</td>
@@ -668,7 +676,7 @@
         <td><b>${esc(p.pos)}</b></td>
         <td>${esc(p.product || '')}</td>
         <td>${esc(p.first_decade || '—')}</td>
-        <td>${esc(p.current_decade || '—')}${p.overdue ? ' <span class="late-tag">просрочено</span>' : ''}</td>
+        <td>${esc(p.current_decade || '—')}${p.overdue ? ' <span class="late-tag">просрочено</span>' : ''}${relTag(p)}</td>
         <td class="num">${p.shift_days == null ? '—' : p.shift_days}</td>
         <td>${fmt(p.required_date)}</td>
         <td>${fmt(p.plan_ship_date || p.invoice_plan_date)}</td>
