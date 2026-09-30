@@ -151,6 +151,13 @@ def test_import_folder_and_portal_guard(tmp_path):
     assert [r["source"] for r in res] == ["segments", "svetofor"]  # отрезки раньше светофора
     assert [f.name for f in inbox.iterdir() if f.is_file()] == ["idet.csv"]
     assert len(list((inbox / "done").iterdir())) == 2 and len(list((inbox / "failed").iterdir())) == 1
+    # разобранные файлы старше 30 дней удаляются при следующем проходе
+    stale = inbox / "done" / "20250101-000000_old.csv"
+    stale.write_text("x")
+    ancient = time.time() - 40 * 86400
+    os.utime(stale, (ancient, ancient))
+    run_sync(engine, settings)
+    assert not stale.exists() and len(list((inbox / "done").iterdir())) == 2
 
     client = TestClient(create_app(engine, settings))
     assert client.get("/api/health").status_code == 200

@@ -24,6 +24,8 @@ class SyncError(Exception):
 # Файл моложе этого ещё может докачиваться по SFTP: обрезанный CSV с верным заголовком загрузился бы
 # как полный отчёт и стёр бы отрезки, которых в нём не оказалось
 SETTLE_SECONDS = 120
+# Разобранные выгрузки лежат в done/ и failed/ столько дней, потом удаляются (отчёт по отрезкам — ~65 МБ за раз)
+KEEP_DAYS = 30
 
 
 def import_folder(engine: Engine, folder: str) -> list[dict]:
@@ -56,7 +58,23 @@ def import_folder(engine: Engine, folder: str) -> list[dict]:
             log.warning("import %s: не похоже ни на одну из выгрузок (отрезки, светофор, план, диспетчерский)", f.name)
         (root / target).mkdir(exist_ok=True)
         shutil.move(str(f), root / target / f"{stamp}_{f.name}")
+    _prune(root, now)
     return results
+
+
+def _prune(root: Path, now: float) -> None:
+    """Удалить из done/ и failed/ файлы старше KEEP_DAYS — иначе папка SFTP растёт без предела."""
+    for sub in ("done", "failed"):
+        d = root / sub
+        if not d.is_dir():
+            continue
+        for f in d.iterdir():
+            if f.is_file() and now - f.stat().st_mtime > KEEP_DAYS * 86400:
+                try:
+                    f.unlink()
+                    log.info("import: удалён старый файл %s/%s", sub, f.name)
+                except OSError as e:
+                    log.warning("import: не удалось удалить %s/%s: %s", sub, f.name, e)
 
 
 def run_sync(engine: Engine, settings: Settings, wait: bool = True) -> list[dict]:
