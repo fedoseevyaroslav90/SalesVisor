@@ -60,5 +60,6 @@ bash deploy/nginx_загрузка.sh      # один раз: ручная за�
 pip install -r requirements.txt -r requirements-dev.txt
 python -m salesvisor load отрезки.csv светофор.csv   # по умолчанию база SQLite в data/; сюда же — отчёты ПДО
 python -m salesvisor serve --port 8000
+python -m salesvisor reload                           # перечитать свежий отчёт по отрезкам из IMPORT_DIR/done после смены логики
 python -m pytest tests
 ```

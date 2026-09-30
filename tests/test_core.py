@@ -548,3 +548,30 @@ def test_released_is_not_debt():
     assert (ps["20"]["released"], ps["20"]["overdue"], ps["20"]["days_late"]) == (False, True, 51)
     o = list_orders(engine, today=today)[0]
     assert (o["overdue"], o["made_positions"], o["ready_positions"], o["positions"]) == (1, 1, 0, 2)
+
+
+def test_cli_reload_takes_latest_file_of_kind(tmp_path, monkeypatch, capsys):
+    """После смены логики разбора: `reload` перечитывает самую свежую выгрузку отрезков из done/, не трогая остальные."""
+    import sys
+
+    from salesvisor.__main__ import main
+
+    done = tmp_path / "import" / "done"
+    done.mkdir(parents=True)
+    pd.DataFrame([seg_row("1200000009", "10", "1", "30 сентября, 2026")]).to_csv(done / "a_old.csv", index=False)
+    pd.DataFrame([seg_row("1200000010", "10", "1", "30 сентября, 2026")]).to_csv(done / "b_new.csv", index=False)
+    pd.DataFrame([svet_row("1200000010", "10", "3Д09", "3Д09", "0", "green")]).to_csv(done / "c_svet.csv", index=False)
+    now = time.time()
+    for name, age in (("a_old.csv", 900), ("b_new.csv", 600), ("c_svet.csv", 300)):
+        os.utime(done / name, (now - age, now - age))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'sv.db'}")
+    monkeypatch.setenv("IMPORT_DIR", str(tmp_path / "import"))
+    monkeypatch.setattr(sys, "argv", ["salesvisor", "reload"])
+    main()
+    out = capsys.readouterr().out
+    assert "b_new.csv" in out and "a_old.csv" not in out and "c_svet.csv" not in out
+    from sqlalchemy import select
+
+    from salesvisor.db import positions
+    with make_engine(f"sqlite:///{tmp_path / 'sv.db'}").connect() as conn:
+        assert [r[0] for r in conn.execute(select(positions.c.order_no))] == ["1200000010"]

@@ -2,6 +2,8 @@
     python -m salesvisor serve [--port 8000]
     python -m salesvisor load ФАЙЛ [ФАЙЛ ...]       загрузить выгрузки вручную (SAP, отчёты ПДО)
     python -m salesvisor sync [--every СЕКУНД]      забрать выгрузки из Metabase или папки IMPORT_DIR (разово или по кругу)
+    python -m salesvisor reload [ВИД ...]           перечитать последнюю выгрузку каждого вида из IMPORT_DIR/done
+                                                    (после смены логики разбора; по умолчанию — отчёт по отрезкам)
 """
 from __future__ import annotations
 
@@ -31,6 +33,8 @@ def main() -> None:
     l.add_argument("files", nargs="+")
     y = sub.add_parser("sync")
     y.add_argument("--every", type=int, default=0, help="повторять каждые N секунд")
+    r = sub.add_parser("reload")
+    r.add_argument("kinds", nargs="*", default=["segments"], help="segments, svetofor, plan, dispatcher")
     args = ap.parse_args()
 
     settings = get_settings()
@@ -53,6 +57,24 @@ def main() -> None:
             published = datetime.fromtimestamp(Path(f).stat().st_mtime) if source in pdo.KINDS else None
             with load_lock(engine):
                 print(f, load_file(engine, source, data, Path(f).name, published_at=published))
+    elif args.cmd == "reload":
+        if not settings.import_dir:
+            raise SystemExit("IMPORT_DIR не задан")
+        engine = make_engine(settings.database_url)
+        done = sorted((f for f in (Path(settings.import_dir) / "done").iterdir() if f.is_file()),
+                      key=lambda f: f.stat().st_mtime, reverse=True)
+        want = set(args.kinds)
+        for f in done:  # от свежих к старым, по одному файлу каждого вида
+            if not want:
+                break
+            data = f.read_bytes()
+            source = sniff_source(data, f.name)
+            if source in want:
+                want.discard(source)
+                with load_lock(engine):
+                    print(f.name, load_file(engine, source, data, f.name))
+        if want:
+            print("не найдено в done/:", ", ".join(sorted(want)))
     elif args.cmd == "sync":
         from .sync import run_sync
         engine = make_engine(settings.database_url)
