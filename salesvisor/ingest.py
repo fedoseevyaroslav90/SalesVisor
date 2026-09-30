@@ -11,7 +11,7 @@ from sqlalchemy import bindparam, delete, insert, select, update
 from sqlalchemy.engine import Engine
 
 from . import parsing as p
-from .db import change_log, dispatcher, positions, segments, snapshots
+from .db import change_log, dispatcher, positions, quality_msgs, segments, snapshots
 
 SVETOFOR_REQUIRED = ["Заказ", "Позиция", "Первая декада", "Текущая декада"]
 SEGMENTS_REQUIRED = ["Заказ клиента", "Позиция заказа клиента", "Номер отрезка по порядку в позиции", "Треб. дата поставки"]
@@ -233,14 +233,16 @@ def _get(r: dict, cols: dict[str, str], *names: str):
     return None
 
 
-def parse_plan(df: pd.DataFrame) -> list[dict]:
-    """По позиции может быть несколько операций на разных линиях. Готовая продукция делается на последней:
-    берём линию и окончание операции с самым поздним плановым концом."""
+def parse_plan(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
+    """ZPP context: план выпуска готовой продукции по позициям, меняется после каждого прогона ППМ.
+    Строк по позиции может быть несколько (разные линии, старые плановые заказы). Линия и окончание — у строки
+    с самым поздним плановым концом; план и факт MES складываются. Возвращает (позиции, сообщения о качестве)."""
     cols = _cols(df)
     missing = PLAN_SIGNATURE - set(cols)
     if missing:
         raise ValueError(f"В плане производства нет колонок: {', '.join(sorted(missing))}")
     agg: dict[tuple[str, str], dict] = {}
+    msgs: dict[str, dict] = {}
     for r in df.to_dict("records"):
         order_no = _key(_get(r, cols, "заказ клиента"))
         pos = _key(_get(r, cols, "позиция заказа", "позиция заказа клиента"))
@@ -250,16 +252,23 @@ def parse_plan(df: pd.DataFrame) -> list[dict]:
         end_d = p.parse_date(_get(r, cols, "дата конца"))
         end_t = p.parse_time(_get(r, cols, "время конца")) or ""
         a = agg.setdefault((order_no, pos), {"order_no": order_no, "pos": pos, "_lines": [], "_best": None,
-                                             "dse": None, "plan_msg": None})
+                                             "dse": None, "plan_msg": None, "plan_qty": 0.0, "plan_fact_qty": 0.0})
         if line and line not in a["_lines"]:
             a["_lines"].append(line)
-        a["dse"] = a["dse"] or p.text(_get(r, cols, "номер дсе"))
-        msg = " ".join(filter(None, [p.text(_get(r, cols, "сообщение")),
-                                     p.text(_get(r, cols, "описание сообщения по качеству"))]))
-        a["plan_msg"] = a["plan_msg"] or (msg[:200] or None)
-        key = (end_d or date.min, end_t)
-        if end_d and (a["_best"] is None or key > a["_best"][0]):
-            a["_best"] = (key, line)
+        a["dse"] = a["dse"] or _key(_get(r, cols, "номер дсе"))
+        a["plan_qty"] += p.parse_number(_get(r, cols, "кол во поступления план")) or 0
+        a["plan_fact_qty"] += p.parse_number(_get(r, cols, "кол во поступления факт mes", "кол во поступления факт")) or 0
+        msg_no = _key(_get(r, cols, "сообщение"))
+        msg_text = p.text(_get(r, cols, "описание сообщения по качеству"))
+        if msg_no or msg_text:
+            a["plan_msg"] = a["plan_msg"] or (msg_text or f"сообщение {msg_no}")[:200]
+            key = msg_no or f"{order_no}-{pos}-{msg_text}"[:20]
+            msgs[key] = {"msg_no": key, "order_no": order_no, "pos": pos, "line": line, "text": (msg_text or "")[:300] or None,
+                         "product": p.text(_get(r, cols, "наименование материала гп", "наименование материала поступления")),
+                         "plan_end_date": end_d}
+        k = (end_d or date.min, end_t)
+        if end_d and (a["_best"] is None or k > a["_best"][0]):
+            a["_best"] = (k, line)
     rows = []
     for a in agg.values():
         best = a.pop("_best")
@@ -269,7 +278,7 @@ def parse_plan(df: pd.DataFrame) -> list[dict]:
         a["plan_end_date"] = best[0][0] if best else None
         a["plan_end_time"] = (best[0][1] or None) if best else None
         rows.append(a)
-    return rows
+    return rows, list(msgs.values())
 
 
 # ---------------------------------------------------------------- диспетчерский отчёт
@@ -422,13 +431,36 @@ def load_segments(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
 
 
 def load_plan(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
-    # Позиции, которых нет в свежем плане, не трогаем: план выгружается за период
-    rows = parse_plan(df)
+    # Позиции, которых нет в свежем плане, не трогаем: в ZPP context только ближайший горизонт.
+    # Сдвиги окончания и смена линии между прогонами ППМ попадают в журнал изменений
+    rows, msgs = parse_plan(df)
     with engine.begin() as conn:
         sid = _snapshot(conn, "plan", origin, len(df))
         known, unknown = _split_known(conn, rows)
         stats = _upsert(conn, known, TRACKED_PLAN, sid)
-    return {"source": "plan", "rows": len(df), "positions": len(known), "not_in_orders": unknown, **stats}
+        new_msgs = _save_quality(conn, msgs, sid)
+    return {"source": "plan", "rows": len(df), "positions": len(known), "not_in_orders": unknown,
+            "quality_msgs": len(msgs), "quality_new": new_msgs, **stats}
+
+
+def _save_quality(conn, msgs: list[dict], snapshot_id: int) -> int:
+    have = {r[0] for r in conn.execute(select(quality_msgs.c.msg_no))}
+    new = [m for m in msgs if m["msg_no"] not in have]
+    now = datetime.now()
+    if new:
+        conn.execute(insert(quality_msgs), [{**m, "first_seen_at": now} for m in new])
+        # Новое несоответствие — событие в журнале позиции, если позиция нам известна
+        known = {(o, ps) for o, ps in conn.execute(select(positions.c.order_no, positions.c.pos))}
+        log = [{"order_no": m["order_no"], "pos": m["pos"], "field": "quality", "old": None,
+                "new": (f"{m['text'] or 'без описания'} ({m['line'] or 'линия ?'})")[:100], "snapshot_id": snapshot_id, "at": now}
+               for m in new if (m["order_no"], m["pos"]) in known]
+        if log:
+            conn.execute(insert(change_log), log)
+    for m in msgs:
+        if m["msg_no"] in have:
+            conn.execute(update(quality_msgs).where(quality_msgs.c.msg_no == m["msg_no"])
+                         .values(text=m["text"], line=m["line"], plan_end_date=m["plan_end_date"]))
+    return len(new)
 
 
 def load_dispatcher(engine: Engine, df: pd.DataFrame, origin: str, end_dates: pd.DataFrame | None = None) -> dict:

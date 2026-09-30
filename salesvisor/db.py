@@ -69,6 +69,8 @@ positions = Table(
     Column("plan_end_time", String(5)),
     Column("dse", String(40)),
     Column("plan_msg", String(200)),
+    Column("plan_qty", Float),            # Кол-во поступления (план) по ZPP context
+    Column("plan_fact_qty", Float),       # Кол-во поступления (факт) MES
     # Диспетчерский отчёт
     Column("disp_decade", String(40)),    # признак декады, например «27. ОКТЯБРЬ 1декада»
     Column("disp_counted", Boolean),      # ПО = «считать»: позиция входит в план декады
@@ -126,6 +128,19 @@ dispatcher = Table(
     Column("km_ready", Float), Column("pcs_ready", Float), Column("ov_km_ready", Float),
     Column("mz_ready", Float), Column("vp_ready", Float),
     Column("segs", Integer), Column("segs_ready", Integer),
+)
+
+# Сообщения о качестве (выявленные несоответствия) из ZPP context. Копятся: прогон ППМ их не стирает
+quality_msgs = Table(
+    "quality_msgs", metadata,
+    Column("msg_no", String(20), primary_key=True),
+    Column("order_no", String(20), nullable=False, index=True),
+    Column("pos", String(10)),
+    Column("line", String(40)),
+    Column("text", String(300)),
+    Column("product", String(300)),
+    Column("plan_end_date", Date),
+    Column("first_seen_at", DateTime, nullable=False, server_default=func.now()),
 )
 
 # Ручная связь заказа SAP с Битрикс24. Приоритетнее номера задачи, найденного в отчёте SAP

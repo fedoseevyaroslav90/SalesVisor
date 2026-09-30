@@ -71,7 +71,7 @@
       <div class="line-strip" id="dayLines"></div>
       <div class="table-wrap">
         <table id="dayTable">
-          <thead><tr><th>Линия</th><th>Окончание</th><th>Заказ / поз.</th><th>Клиент</th><th>Изделие</th><th>Менеджер</th><th>План отгрузки</th><th>Этап</th><th>Выполнение</th></tr></thead>
+          <thead><tr><th>Окончание</th><th>Заказ / поз.</th><th>Клиент</th><th>Изделие</th><th>Менеджер</th><th>План отгрузки</th><th>Этап</th><th>Выполнение</th></tr></thead>
           <tbody></tbody>
         </table>
         <p class="empty" id="dayEmpty" hidden></p>
@@ -110,7 +110,7 @@
     <section id="tab-changes" class="tab">
       <div class="toolbar">
         <label>За <select id="days"><option value="1">1 день</option><option value="7" selected>7 дней</option><option value="30">30 дней</option></select></label>
-        <label>Что <select id="field"><option value="">Всё</option><option value="current_decade">Текущая декада</option><option value="required_date">Треб. дата</option><option value="color">Цвет</option><option value="stage">Этап</option><option value="line">Линия</option><option value="plan_end_date">План. окончание</option><option value="disp_decade">Признак декады</option></select></label>
+        <label>Что <select id="field"><option value="">Всё</option><option value="current_decade">Текущая декада</option><option value="required_date">Треб. дата</option><option value="color">Цвет</option><option value="stage">Этап</option><option value="line">Линия</option><option value="plan_end_date">План. окончание</option><option value="disp_decade">Признак декады</option><option value="quality">Несоответствия</option></select></label>
       </div>
       <div class="table-wrap">
         <table class="changes" id="changes">
@@ -122,7 +122,7 @@
     </section>
 
     <section id="tab-load" class="tab">
-      <p class="lead">Обычно данные приходят сами из Metabase по расписанию. Здесь можно загрузить выгрузку вручную: CSV или Excel из вопросов «Отчёт по отрезкам xt» и «Светофор v2», а также план производства и диспетчерский отчёт из SAP. Тип файла определяется по колонкам.</p>
+      <p class="lead">Обычно данные приходят сами из Metabase по расписанию. Здесь можно загрузить выгрузку вручную: CSV или Excel из вопросов «Отчёт по отрезкам xt» и «Светофор v2», а также план производства ZPP context и диспетчерский отчёт. Тип файла определяется по колонкам.</p>
       <div class="cards">
         <div class="card">
           <h3>Загрузить файл</h3>

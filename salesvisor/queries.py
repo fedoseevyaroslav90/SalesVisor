@@ -4,10 +4,10 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import desc, or_, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.engine import Engine
 
-from .db import bitrix_links, change_log, comments, dispatcher, positions, segments, snapshots
+from .db import bitrix_links, change_log, comments, dispatcher, positions, quality_msgs, segments, snapshots
 
 COLOR_RANK = {"red": 0, "yellow": 1, "green": 2, None: 3}
 FIELD_NAMES = {
@@ -20,6 +20,7 @@ FIELD_NAMES = {
     "plan_end_date": "План. окончание производства",
     "disp_decade": "Декада в диспетчерском",
     "disp_ready": "Готовность в диспетчерском",
+    "quality": "Несоответствие по качеству",
 }
 
 
@@ -69,6 +70,9 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
         for (order_no,) in conn.execute(select(comments.c.order_no)):
             n_comments[order_no] += 1
         links = {r.order_no: r for r in conn.execute(select(bitrix_links))}
+        n_quality = defaultdict(int)
+        for (order_no,) in conn.execute(select(quality_msgs.c.order_no)):
+            n_quality[order_no] += 1
 
     if scope == "open":
         rows = [r for r in rows if not r["stale"]]
@@ -107,12 +111,19 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
             "bitrix_deal": links[order_no].deal_id if order_no in links else None,
             "amount_rub": sum(p.get("amount_rub") or 0 for p in ps),
             "comments": n_comments.get(order_no, 0),
+            "quality": n_quality.get(order_no, 0),
+            "lines": sorted({p["line"] for p in ps if p.get("line")}),
         }
-        if color and color != "nolink" and (color != "none" and order["color"] != color or color == "none" and order["color"]):
+        if color == "quality":
+            if not order["quality"]:
+                continue
+        elif color and color != "nolink" and (color != "none" and order["color"] != color or color == "none" and order["color"]):
             continue
         if color == "nolink":
             if order["bitrix_task"] or order["bitrix_deal"]:
                 continue
+        elif color == "quality":
+            pass
         elif overdue_only and not order["overdue"]:
             continue
         if q and not any(q in str(order.get(f) or "").lower() for f in ("order_no", "customer", "manager")) \
@@ -153,6 +164,8 @@ def order_card(engine: Engine, order_no: str, today: date | None = None) -> dict
         notes = [_row(r) for r in conn.execute(
             select(comments).where(comments.c.order_no == order_no).order_by(desc(comments.c.created_at)))]
         link = conn.execute(select(bitrix_links).where(bitrix_links.c.order_no == order_no)).first()
+        quality = [_row(r) for r in conn.execute(select(quality_msgs).where(quality_msgs.c.order_no == order_no)
+                                                   .order_by(desc(quality_msgs.c.plan_end_date)))]
     ps.sort(key=lambda p: _pos_sort(p["pos"]))
     for p in ps:
         p["segments"] = sorted(segs.get(p["pos"], []), key=lambda s: _pos_sort(s["seg_no"]))
@@ -166,7 +179,8 @@ def order_card(engine: Engine, order_no: str, today: date | None = None) -> dict
         "deal_id": link.deal_id if link else None,
         "manual": _row(link) if link else None,
     }
-    return {"order_no": order_no, "positions": ps, "changes": changes, "comments": notes, "bitrix": bitrix}
+    return {"order_no": order_no, "positions": ps, "changes": changes, "comments": notes, "bitrix": bitrix,
+            "quality": quality}
 
 
 def _pos_sort(v):
@@ -198,12 +212,18 @@ def meta(engine: Engine) -> dict:
         last = {r.source: _iso(r.loaded_at) for r in conn.execute(
             select(snapshots.c.source, snapshots.c.loaded_at).order_by(snapshots.c.loaded_at))}
         lines = sorted({r[0] for r in conn.execute(select(positions.c.line).where(positions.c.line.is_not(None))) if r[0]})
-    return {"managers": managers, "depts": depts, "lines": lines, "last_load": last, "today": date.today().isoformat()}
+        quality_total = conn.execute(select(func.count()).select_from(quality_msgs)).scalar()
+    return {"managers": managers, "depts": depts, "lines": lines, "last_load": last, "today": date.today().isoformat(),
+            "quality_total": quality_total}
 
 
 def _produced(p: dict) -> bool:
+    """Произведено: все отрезки со статусом «Произведен» или факт MES по ZPP context достиг плана."""
     total = p.get("segments_total") or 0
-    return bool(total) and (p.get("segments_produced") or 0) >= total
+    if total and (p.get("segments_produced") or 0) >= total:
+        return True
+    plan, fact = p.get("plan_qty") or 0, p.get("plan_fact_qty") or 0
+    return plan > 0 and fact >= plan * 0.99
 
 
 def _shipped(p: dict) -> bool:
@@ -232,8 +252,12 @@ def day_plan(engine: Engine, day: date, *, manager: str = "", dept: str = "", li
         stmt = stmt.where(positions.c.line == line)
     with engine.connect() as conn:
         rows = [position_view(dict(r._mapping), today) for r in conn.execute(stmt)]
+        qmap = defaultdict(list)
+        for m in conn.execute(select(quality_msgs.c.order_no, quality_msgs.c.pos, quality_msgs.c.text)):
+            qmap[(m.order_no, m.pos)].append(m.text or "без описания")
     out = []
     for r in rows:
+        r["quality"] = qmap.get((r["order_no"], r["pos"]), [])
         ship_plan = r.get("plan_ship_date") or r.get("invoice_plan_date")
         make = bool(r.get("plan_end_date")) and (r["plan_end_date"] <= day.isoformat() if with_backlog
                                                  else r["plan_end_date"] == day.isoformat())
@@ -245,7 +269,8 @@ def day_plan(engine: Engine, day: date, *, manager: str = "", dept: str = "", li
             ship = ship and (ship_plan == day.isoformat() or not ship_done)
         if not (make or ship):
             continue
-        out.append({**r, "ship_plan": ship_plan, "task_make": make, "task_ship": ship,
+        risk = bool(r.get("plan_end_date") and ship_plan and r["plan_end_date"] > ship_plan and not ship_done and not make_done)
+        out.append({**r, "ship_plan": ship_plan, "task_make": make, "task_ship": ship, "risk": risk,
                     "make_done": make_done, "ship_done": ship_done,
                     "late": (make and not make_done and r["plan_end_date"] < day.isoformat())
                             or (ship and not ship_done and ship_plan < day.isoformat())})
@@ -259,6 +284,8 @@ def day_plan(engine: Engine, day: date, *, manager: str = "", dept: str = "", li
         "ship": len(ship), "ship_done": sum(r["ship_done"] for r in ship),
         "late": sum(r["late"] for r in out),
         "no_line": sum(1 for r in out if not r.get("line")),
+        "quality": sum(1 for r in out if r["quality"]),
+        "risk": sum(1 for r in out if r["risk"]),
     }
     by_line: dict[str, dict] = {}
     for r in make:

@@ -7,6 +7,7 @@
     get: k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
     set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* без хранилища */ } },
   };
+  const num = (v, d = 1) => (v ? v.toLocaleString('ru-RU', { maximumFractionDigits: d, minimumFractionDigits: 0 }) : '0');
   const COLOR_NAME = { red: 'красный', yellow: 'жёлтый', green: 'зелёный' };
   const LIMIT = 400;
   const state = { meta: {}, orders: [], color: '', overdue: false, changes: [] };
@@ -68,6 +69,7 @@
       ['green', 'Зелёные', n('green')],
       ['none', 'Без светофора', all.filter(o => !o.color).length],
       ['nolink', 'Без связи с Битрикс24', all.filter(o => !o.bitrix_task && !o.bitrix_deal).length],
+      ['quality', 'С несоответствиями', all.filter(o => o.quality).length],
     ];
     $('#tiles').innerHTML = tiles.map(([code, label, v]) => {
       const active = code === 'late' ? state.overdue : !state.overdue && state.color === code;
@@ -81,7 +83,8 @@
     }));
 
     const rows = all.filter(o => (state.overdue ? o.overdue : true) &&
-      (!state.color || (state.color === 'none' ? !o.color : state.color === 'nolink' ? !o.bitrix_task && !o.bitrix_deal : o.color === state.color)));
+      (!state.color || (state.color === 'none' ? !o.color : state.color === 'nolink' ? !o.bitrix_task && !o.bitrix_deal
+        : state.color === 'quality' ? o.quality > 0 : o.color === state.color)));
     $('#empty').hidden = rows.length > 0;
     $('#empty').textContent = all.length ? 'Под фильтр ничего не попало.' : 'Данных пока нет. Загрузите выгрузки на вкладке «Загрузка».';
     $('#shown').textContent = rows.length > LIMIT ? `Показаны первые ${LIMIT} из ${rows.length}. Уточните фильтр или поиск.` : '';
@@ -90,7 +93,7 @@
       const task = [bxLink('task', o.bitrix_task), bxLink('deal', o.bitrix_deal)].filter(Boolean).join('<br>');
       return `<tr data-no="${esc(o.order_no)}">
         <td><span class="dot ${o.color || ''}" title="${esc(COLOR_NAME[o.color] || 'нет данных светофора')}"></span></td>
-        <td><b>${esc(o.order_no)}</b>${o.comments ? ` <span class="sub" title="Комментарии">💬${o.comments}</span>` : ''}${o.overdue ? `<div class="late-tag">просрочено поз.: ${o.overdue}</div>` : ''}</td>
+        <td><b>${esc(o.order_no)}</b>${o.comments ? ` <span class="sub" title="Комментарии">💬${o.comments}</span>` : ''}${o.overdue ? `<div class="late-tag">просрочено поз.: ${o.overdue}</div>` : ''}${o.quality ? `<div class="q-tag" title="Сообщения о качестве">несоответствий: ${o.quality}</div>` : ''}</td>
         <td>${esc(o.customer || '—')}</td>
         <td>${esc(o.sales_dept || '—')}<div class="sub">${esc(o.manager || '')}</div></td>
         <td>${o.positions} ${o.red ? `<span class="cnt red">●${o.red}</span>` : ''}${o.yellow ? `<span class="cnt yellow">●${o.yellow}</span>` : ''}</td>
@@ -134,13 +137,13 @@
         <td class="num">${p.shift_days == null ? '—' : p.shift_days}</td>
         <td>${fmt(p.required_date)}</td>
         <td>${fmt(p.plan_ship_date || p.invoice_plan_date)}</td>
-        <td>${p.line ? `<b>${esc(p.line)}</b><div class="sub">${fmt(p.plan_end_date)} ${esc(p.plan_end_time || '')}</div>` : '<span class="muted">—</span>'}</td>
+        <td>${p.line ? `<b>${esc(p.line)}</b><div class="sub">${fmt(p.plan_end_date)} ${esc(p.plan_end_time || '')}${p.plan_qty ? ` · MES ${num(p.plan_fact_qty, 2)} из ${num(p.plan_qty, 2)}` : ''}</div>` : '<span class="muted">—</span>'}</td>
         <td>${esc(p.stage)}</td>
         <td>${p.segments.length ? `<span class="linkish">${p.segments.length}</span>` : '—'}</td>
       </tr>
       <tr class="seg" data-for="${esc(p.pos)}" hidden><td></td><td colspan="10">
         ${p.plan_lines && p.plan_lines !== p.line ? `<div>Операции на линиях: ${esc(p.plan_lines)}</div>` : ''}
-        ${p.dse ? `<div>ДСЕ ${esc(p.dse)}${p.plan_msg ? ' · ' + esc(p.plan_msg) : ''}</div>` : ''}
+        ${p.dse ? `<div>ДСЕ ${esc(p.dse)}</div>` : ''}
         ${dispLine(p)}
         ${p.segments.map(s => `<div>№${esc(s.seg_no)}: ${s.length ?? '—'} ${esc(s.unit || '')} <span class="flags">${FLAGS.map(([k, l, t]) => `<span class="${s[k] ? 'on' : ''}" title="${t}">${l}</span>`).join('')}</span>
           ${s.fact_ship_date ? 'отгружен ' + fmt(s.fact_ship_date) : ''} ${s.prod_order ? '· зак. на пр-во ' + esc(s.prod_order) : ''}</div>`).join('')}
@@ -163,6 +166,11 @@
           <span class="error-text" id="bxErr"></span>
         </form>
       </div>
+
+      ${d.quality && d.quality.length ? `<h3>Несоответствия по качеству</h3>
+      <table class="mini"><thead><tr><th>Сообщение</th><th>Поз.</th><th>Линия</th><th>Что выявлено</th><th>План. окончание</th><th>Появилось</th></tr></thead><tbody>
+        ${d.quality.map(q => `<tr><td>${esc(q.msg_no)}</td><td>${esc(q.pos || '')}</td><td>${esc(q.line || '—')}</td><td><span class="q-tag">${esc(q.text || 'без описания')}</span></td><td>${fmt(q.plan_end_date)}</td><td>${fmtDT(q.first_seen_at)}</td></tr>`).join('')}
+      </tbody></table>` : ''}
 
       <h3>Позиции</h3>
       <div class="table-wrap"><table class="mini">
@@ -263,13 +271,16 @@
     const d = state.day, what = $('#dayWhat').value, lineSel = $('#dayLine').value || state.dayLine;
     const s = d.summary;
     const hasPlan = (state.meta.lines || []).length > 0;
-    $('#dayNote').textContent = (hasPlan ? '' : 'План производства ещё не загружен: линии и плановое окончание появятся после загрузки выгрузки SAP «План производства». Пока показан план отгрузки. ')
+    $('#dayNote').textContent = (hasPlan ? 'Произвести — по ZPP context (линия, плановое окончание); сделано, если все отрезки произведены или факт MES дошёл до плана. Отгрузить — по плану отгрузки. '
+      : 'План производства ещё не загружен: линии и плановое окончание появятся после загрузки ZPP context. Пока показан план отгрузки. ')
       + `Для менеджера и отдела действуют фильтры с вкладки «Заказы».`;
     const tiles = [
       ['', 'Позиций в плане', s.positions],
       ['green', 'Произвести: сделано', `${s.make_done}/${s.make}`],
       ['green', 'Отгрузить: сделано', `${s.ship_done}/${s.ship}`],
       ['late', 'Отстают от плана', s.late],
+      ['quality', 'С несоответствиями', s.quality],
+      ['late', 'Производство позже отгрузки', s.risk],
     ];
     $('#dayTiles').innerHTML = tiles.map(([c, l, v]) => `<div class="tile ${c}" style="cursor:default"><div class="n">${v}</div><div class="l">${l}</div></div>`).join('');
     $('#dayLines').innerHTML = d.lines.map(b => `<button class="line-chip ${lineSel === (b.line || '-') ? 'active' : ''}" data-line="${esc(b.line || '-')}">
@@ -285,10 +296,9 @@
     $('#dayEmpty').textContent = 'На этот день по плану ничего нет.';
     let prev = null;
     $('#dayTable tbody').innerHTML = rows.slice(0, 1500).map(r => {
-      const head = r.line !== prev && hasPlan ? `<tr class="line-head"><td colspan="9">${esc(r.line || 'Линия не указана')}</td></tr>` : '';
+      const head = r.line !== prev && hasPlan ? `<tr class="line-head"><td colspan="8">${esc(r.line || 'Линия не указана')}</td></tr>` : '';
       prev = r.line;
       return head + `<tr data-no="${esc(r.order_no)}">
-        <td>${esc(r.line || '—')}</td>
         <td>${r.plan_end_date ? fmt(r.plan_end_date) + ' ' + esc(r.plan_end_time || '') : '—'}</td>
         <td><b>${esc(r.order_no)}</b> / ${esc(r.pos)}</td>
         <td>${esc(r.customer || '—')}</td>
@@ -296,7 +306,7 @@
         <td>${esc(r.manager || '')}</td>
         <td>${fmt(r.ship_plan)}</td>
         <td>${esc(r.stage)}</td>
-        <td>${r.task_make ? taskTag('make', r.make_done, r.late && !r.make_done) : ''}${r.task_ship ? taskTag('ship', r.ship_done, r.late && !r.ship_done) : ''}</td>
+        <td>${r.task_make ? taskTag('make', r.make_done, r.late && !r.make_done) : ''}${r.task_ship ? taskTag('ship', r.ship_done, r.late && !r.ship_done) : ''}${r.risk ? '<div class="late-tag" title="Плановое окончание производства позже плана отгрузки">производство позже отгрузки</div>' : ''}${r.quality.map(t => `<div class="q-tag">${esc(t)}</div>`).join('')}</td>
       </tr>`;
     }).join('');
     document.querySelectorAll('#dayTable tbody tr[data-no]').forEach(tr => tr.addEventListener('click', () => openOrder(tr.dataset.no)));
@@ -307,7 +317,6 @@
 
   // ---------- диспетчерский ----------
   const MONTHS_UP = ['ЯНВАРЬ', 'ФЕВРАЛЬ', 'МАРТ', 'АПРЕЛЬ', 'МАЙ', 'ИЮНЬ', 'ИЮЛЬ', 'АВГУСТ', 'СЕНТЯБРЬ', 'ОКТЯБРЬ', 'НОЯБРЬ', 'ДЕКАБРЬ'];
-  const num = (v, d = 1) => (v ? v.toLocaleString('ru-RU', { maximumFractionDigits: d, minimumFractionDigits: 0 }) : '0');
   const mln = v => num((v || 0) / 1e6, 1);
   function pctCell(fact, plan) {
     if (!plan) return '<td>—</td>';
