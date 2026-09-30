@@ -35,11 +35,22 @@ def _mark(engine: Engine, **kw) -> None:
                                                                             for k, v in kw.items()}))
 
 
+def _download(url: str) -> bytes:
+    """В ссылке на скачивание — служебный токен: в сообщении об ошибке только код ответа, без адреса."""
+    try:
+        r = httpx.get(url, timeout=600, follow_redirects=True)
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"скачивание: нет связи ({type(e).__name__})") from None
+    if r.status_code != 200:
+        raise RuntimeError(f"скачивание: HTTP {r.status_code}")
+    return r.content
+
+
 def collect(engine: Engine, settings: Settings, bx: Bitrix | None = None, download=None) -> list[dict]:
     """Просмотреть комментарии задач, скачать и загрузить новые вложения в хронологии. download(url) -> bytes."""
     own = bx is None
     bx = bx or Bitrix(settings)
-    download = download or (lambda url: httpx.get(url, timeout=600, follow_redirects=True).content)
+    download = download or _download
     try:
         with engine.connect() as conn:
             seen = {r[0] for r in conn.execute(select(bitrix_files.c.attachment_id))}
