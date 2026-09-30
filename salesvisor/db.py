@@ -54,6 +54,11 @@ positions = Table(
     Column("segments_in_transit", Integer, default=0),
     Column("segments_shipped", Integer, default=0),
     Column("segments_invoiced", Integer, default=0),
+    # Флаги статусов в SAP не накопительные: у отрезка стоят флаги только его текущего шага (отгруженный — П, О, Ф,
+    # без С и Г). Поэтому считаем цепочкой: готово — «готов к отгрузке» и всё дальше; ушло — в пути, отгружено
+    # или отфактуровано
+    Column("segments_ready_plus", Integer),
+    Column("segments_done", Integer),
     Column("last_fact_ship_date", Date),
     Column("length_plan", Float),
     Column("unit", String(10)),

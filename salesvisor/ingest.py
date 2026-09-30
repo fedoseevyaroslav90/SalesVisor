@@ -34,15 +34,17 @@ TRACKED_DISPATCHER = ["disp_decade", "disp_ready"]
 
 COLORS = {"red", "yellow", "green"}
 
-STAGES = [
-    # (поле-счётчик, название этапа, когда все отрезки дошли до него)
-    ("segments_invoiced", "Отфактурирован"),
-    ("segments_shipped", "Отгружен"),
-    ("segments_in_transit", "В пути"),
-    ("segments_ready", "Готов к отгрузке"),
-    ("segments_stock", "На складе"),
-    ("segments_produced", "Произведён"),
-]
+# Шаги отрезка по порядку. Флаги SAP не накопительные (у отгруженного отрезка «На складе» и «Готов к отгрузке»
+# сняты), поэтому шаг отрезка — самый дальний из отмеченных, а этап позиции — шаг самого отстающего отрезка
+LEVELS = ["Не произведён", "Произведён", "На складе", "Готов к отгрузке", "В пути", "Отгружен", "Отфактурирован"]
+READY_LEVEL, DONE_LEVEL = 3, 4   # готово к отгрузке и дальше; ушло с завода (в пути, отгружено, отфактуровано)
+
+
+def seg_level(seg: dict) -> int:
+    for level, flag in ((6, "invoiced"), (5, "shipped"), (4, "in_transit"), (3, "ready"), (2, "stock"), (1, "produced")):
+        if seg.get(flag):
+            return level
+    return 0
 
 
 def read_table(data: bytes, filename: str) -> pd.DataFrame:
@@ -194,12 +196,18 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
                 "bitrix_task": p.parse_bitrix_task(raw_task),
                 "segments_total": 0, "segments_produced": 0, "segments_stock": 0, "segments_ready": 0,
                 "segments_in_transit": 0, "segments_shipped": 0, "segments_invoiced": 0,
+                "segments_ready_plus": 0, "segments_done": 0, "_min_level": 6, "_started": 0,
                 "length_plan": 0.0, "amount_rub": 0.0, "mp_rub": 0.0 if mp_col else None,
                 "mz_rub": 0.0 if mz_col else None, "last_fact_ship_date": None,
             }
         a["segments_total"] += 1
         for flag in ("produced", "stock", "ready", "in_transit", "shipped", "invoiced"):
             a[f"segments_{flag}"] += int(seg[flag])
+        level = seg_level(seg)
+        a["segments_ready_plus"] += int(level >= READY_LEVEL)
+        a["segments_done"] += int(level >= DONE_LEVEL)
+        a["_started"] += int(level >= 1)
+        a["_min_level"] = min(a["_min_level"], level)
         a["length_plan"] += seg["length"] or 0
         if amount_col:
             a["amount_rub"] += p.parse_number(r.get(amount_col)) or 0
@@ -212,9 +220,10 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
             a["last_fact_ship_date"] = seg["fact_ship_date"]
 
     for a in agg.values():
-        a["stage"] = stage_of(a)
+        a["stage"] = stage_of(a, a.pop("_min_level"), a.pop("_started"))
         total = a["segments_total"]
-        a["closed"] = total > 0 and (a["segments_shipped"] == total or a["segments_invoiced"] == total)
+        # закрыта, когда все отрезки ушли с завода (в пути, отгружены) или отфактурированы
+        a["closed"] = total > 0 and a["segments_done"] == total
     return list(segs.values()), list(agg.values())
 
 
@@ -229,17 +238,14 @@ def _money_col(columns, prefix: str) -> str | None:
     return cands[0] if cands else None
 
 
-def stage_of(a: dict) -> str:
+def stage_of(a: dict, min_level: int, started: int) -> str:
+    """Этап позиции — шаг самого отстающего отрезка; часть отрезков ещё не произведена — «В производстве k/n»."""
     total = a.get("segments_total") or 0
     if not total:
         return "Нет отрезков"
-    for field, name in STAGES:
-        if (a.get(field) or 0) >= total:
-            return name
-    produced = a.get("segments_produced") or 0
-    if produced:
-        return f"В производстве {produced}/{total}"
-    return "Не произведён"
+    if min_level == 0 and started:
+        return f"В производстве {started}/{total}"
+    return LEVELS[min_level]
 
 
 # ---------------------------------------------------------------- план производства

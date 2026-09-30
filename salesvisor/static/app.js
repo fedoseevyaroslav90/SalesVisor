@@ -339,7 +339,7 @@
         <td>${esc(o.customer || '—')}</td>
         <td>${esc(o.sales_dept || '—')}<div class="sub">${esc(o.manager || '')}</div></td>
         <td>${o.positions} ${o.red ? `<span class="cnt red">●${o.red}</span>` : ''}${o.yellow ? `<span class="cnt yellow">●${o.yellow}</span>` : ''}
-          <div class="sub"><span class="n-ok" title="Позиций, у которых все отрезки готовы или отгружены">готово ${o.ready_positions}</span>${o.positions - o.ready_positions ? ` · <span class="n-bad">не готово ${o.positions - o.ready_positions}</span>` : ''}</div></td>
+          <div class="sub"><span class="n-ok" title="Позиций, у которых все отрезки готовы к отгрузке, в пути или отгружены">готово ${o.ready_positions}</span>${o.positions - o.ready_positions ? ` · <span class="n-bad">не готово ${o.positions - o.ready_positions}</span>` : ''}</div></td>
         <td>${esc(o.first_decade || '—')}</td>
         <td>${esc(o.current_decade || '—')}</td>
         <td class="num ${o.max_shift > 30 ? 'neg' : ''}">${o.max_shift == null ? '—' : o.max_shift + ' дн.'}</td>

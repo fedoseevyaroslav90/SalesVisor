@@ -28,12 +28,13 @@ def test_parsing():
     assert p.parse_bitrix_task("Громова") is None
 
 
-def seg_row(order, pos, seg, req, produced="@EB@", shipped="@EB@", invoiced="@EB@", task=None, manager="IVANOVA"):
+def seg_row(order, pos, seg, req, produced="@EB@", shipped="@EB@", invoiced="@EB@", task=None, manager="IVANOVA",
+            stock="@EB@", ready="@EB@", transit="@EB@"):
     return {
         "Заказ клиента": order, "Позиция заказа клиента": pos, "Номер отрезка по порядку в позиции": seg,
         "Треб. дата поставки": req, "Создал": manager, "Имя заказчика": "ООО Альфа", "Описание отдела сбыта": "Отдел РФ",
-        "Статус Произведен": produced, "Статус На складе": "@EB@", "Статус Готов к отгрузке": "@EB@",
-        "Статус Отгружен": shipped, "Статус Отфактурирован": invoiced, "Статус В пути": "@EB@",
+        "Статус Произведен": produced, "Статус На складе": stock, "Статус Готов к отгрузке": ready,
+        "Статус Отгружен": shipped, "Статус Отфактурирован": invoiced, "Статус В пути": transit,
         "Длина отдельного отрезка": "2", "ЕИ": "КМ", "Номер задачи в Битрикс": task,
     }
 
@@ -499,3 +500,27 @@ def test_feed_events_z6_control_and_late30():
     ev = {(c["order_no"], c["field"]): c for c in recent_changes(engine, days=1)}
     assert ev[("1200000101", "reject_code")]["old"] == "Z6" and ev[("1200000101", "reject_code")]["new"] == "(пусто)"
     assert ("1200000102", "new_position") in ev
+
+
+def test_status_flags_are_not_cumulative():
+    """Флаги SAP не накопительные: у отрезка в пути нет «Готов к отгрузке», у отгруженного — «На складе».
+    Отрезок в пути — ушёл с завода: позиция готова и закрыта, не просрочена; этап — по самому отстающему отрезку."""
+    engine = make_engine("sqlite:///:memory:")
+    Y, R = "@08@", "@0A@"
+    req = "1 сентября, 2026"
+    segs = pd.DataFrame([
+        seg_row("1200000091", "10", "1", req, produced=Y, transit=Y),                                   # П··В··
+        seg_row("1200000091", "20", "1", req, produced=Y, shipped=Y, invoiced=Y),                       # П···ОФ
+        seg_row("1200000091", "20", "2", req, produced=Y, stock=Y, ready=Y),                            # ПСГ···
+        seg_row("1200000091", "30", "1", req, produced=Y, stock=Y, ready=R),                            # ПСr··· — не готов
+        seg_row("1200000091", "40", "1", req, produced=Y, shipped=Y),                                   # П···О·
+        seg_row("1200000091", "40", "2", req),                                                          # ······
+    ])
+    load_segments(engine, segs, "d1")
+    ps = {p["pos"]: p for p in order_card(engine, "1200000091", today=date(2026, 9, 30))["positions"]}
+    assert (ps["10"]["stage"], ps["10"]["closed"], ps["10"]["overdue"]) == ("В пути", True, False)
+    assert (ps["20"]["stage"], ps["20"]["closed"], ps["20"]["overdue"]) == ("Готов к отгрузке", False, True)
+    assert (ps["30"]["stage"], ps["30"]["closed"]) == ("На складе", False)
+    assert (ps["40"]["stage"], ps["40"]["closed"]) == ("В производстве 1/2", False)
+    o = list_orders(engine, scope="all", today=date(2026, 9, 30))[0]
+    assert (o["segments_ready"], o["segments_total"], o["ready_positions"]) == (4, 6, 2)

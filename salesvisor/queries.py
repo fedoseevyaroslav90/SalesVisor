@@ -213,7 +213,9 @@ def _filtered_positions(engine: Engine, scope: str, manager: str, dept: str, f: 
     out = []
     for p in rows:
         link = links.get(p["order_no"])
-        p["segments_ready"] = (p.get("segments_ready") or 0) + (p.get("segments_shipped") or 0)
+        # готово — «готов к отгрузке» и дальше (флаги SAP не накопительные); до перезагрузки отрезков — по-старому
+        p["segments_ready"] = (p["segments_ready_plus"] if p.get("segments_ready_plus") is not None
+                               else (p.get("segments_ready") or 0) + (p.get("segments_shipped") or 0))
         p["quality"] = n_quality.get((p["order_no"], p["pos"]), 0)
         # у заказа — все его сообщения, в том числе по отгруженным позициям (как в версии передачи)
         p["quality_order"] = n_quality.get(p["order_no"], 0)
@@ -437,7 +439,7 @@ def _produced(p: dict) -> bool:
 
 def _shipped(p: dict) -> bool:
     total = p.get("segments_total") or 0
-    return bool(p.get("closed")) or bool(total) and (p.get("segments_shipped") or 0) >= total
+    return bool(p.get("closed")) or bool(total) and (p.get("segments_done") or p.get("segments_shipped") or 0) >= total
 
 
 # Производственные сутки — с 08:00 до 08:00: окончание до 08:00 относится к предыдущим суткам
