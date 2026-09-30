@@ -15,6 +15,7 @@
       <button data-tab="day">План на день</button>
       <button data-tab="disp">Диспетчерский</button>
       <button data-tab="changes">Изменения</button>
+      <button data-tab="stats">Статистика</button>
       <button data-tab="load">Загрузка</button>
     </nav>
     <span class="meta-line" id="lastLoad"></span>
@@ -206,6 +207,32 @@
         </table>
         <p class="empty" id="changesEmpty" hidden>За этот период изменений нет.</p>
       </div>
+    </section>
+
+    <section id="tab-stats" class="tab">
+      <div class="toolbar">
+        <label class="check" title="OTD и отчёт по срокам считаются по отгруженным позициям — без них будут только открытые">
+          <input id="statsShipped" type="checkbox" checked> вместе с отгруженными</label>
+        <span class="toolbar-end"><button class="btn secondary" id="statsExport" title="Все таблицы вкладки — в CSV для Excel">Скачать</button></span>
+      </div>
+      <p class="meta-line" id="statsNote"></p>
+      <div class="tiles" id="statsTiles"></div>
+      <h3 class="st-h">Отчёт по срокам — по месяцам первой даты клиента</h3>
+      <p class="meta-line">Первая дата — конец первой декады светофора (обещано клиенту). «В срок» — отгружено не позже неё;
+        «+N декад» — отгружено позже на N декад; «не выполнено» — дата прошла, а позиция не отгружена; «в работе» — дата не наступила.
+        OTD месяца — «в срок» из отгруженных и невыполненных. Отгрузка — по фактическим датам отчёта по отрезкам.</p>
+      <div class="table-wrap"><table id="statsMonths" class="disp"><thead><tr>
+        <th>Месяц</th><th>Заказов</th><th>Позиций</th><th>ГП, км</th><th>В срок</th><th>+1</th><th>+2</th><th>+3</th><th>+4 и больше</th>
+        <th>Не выполнено</th><th>В работе</th><th>OTD, %</th><th title="Среднее смещение текущей декады от первой по светофору">Ср. смещение, дн.</th><th>МП, млн ₽</th><th>Распределение</th>
+      </tr></thead><tbody></tbody></table></div>
+      <div class="st-grid">
+        <div><h3 class="st-h">Глубина просрочки (открытые позиции)</h3><div class="table-wrap"><table id="statsDepth"></table></div></div>
+        <div><h3 class="st-h">Топ-10 заказчиков по невыполнению в срок</h3><div class="table-wrap"><table id="statsCustomers"></table></div></div>
+        <div><h3 class="st-h">Направления (отдел сбыта)</h3><div class="table-wrap"><table id="statsDepts"></table></div></div>
+        <div><h3 class="st-h">Причины отклонения (открытые позиции)</h3><div class="table-wrap"><table id="statsRejects"></table></div></div>
+        <div><h3 class="st-h">Линии (открытые позиции в плане производства)</h3><div class="table-wrap"><table id="statsLines"></table></div></div>
+      </div>
+      <p class="empty" id="statsEmpty" hidden></p>
     </section>
 
     <section id="tab-load" class="tab">

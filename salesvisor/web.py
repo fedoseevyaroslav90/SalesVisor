@@ -175,6 +175,11 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
         return queries.list_positions(engine, scope=scope, manager=manager, dept=dept, filters=filters_of(request),
                                       sort=sort, offset=max(0, offset), limit=max(1, min(limit, 1000)))
 
+    @app.get("/api/stats")
+    def api_stats(request: Request, scope: str = "all", manager: str = "", dept: str = ""):
+        """Статистика и отчёт по срокам по текущему отбору (по умолчанию — вместе с отгруженными: для OTD)."""
+        return queries.stats(engine, scope=scope, manager=manager, dept=dept, filters=filters_of(request))
+
     @app.get("/api/export.xlsx")
     def api_export(request: Request, view: str = "orders", scope: str = "open", manager: str = "", dept: str = "",
                    color: str = "", overdue: bool = False, sort: str = "", note: str = ""):

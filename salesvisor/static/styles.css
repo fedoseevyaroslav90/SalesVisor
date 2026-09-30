@@ -279,3 +279,12 @@ table.mini.sub td:nth-child(3) { min-width: 180px; }
 #orders td:nth-child(2), #orders td:nth-child(5) { white-space: normal; }
 #orders td:nth-child(2) { min-width: 130px; }
 #orders td:nth-child(2) .late-tag, #orders td:nth-child(2) .q-tag, #orders td:nth-child(5) span { white-space: nowrap; }
+
+/* ---- статистика (30.09.2026) ---- */
+.st-h { font-size: 14px; margin: 18px 0 6px; }
+.st-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.st-grid table td:first-child { white-space: normal; }
+.dist { display: flex; width: 160px; height: 10px; border-radius: 5px; overflow: hidden; background: var(--line); }
+.dist i { display: block; height: 100%; }
+#statsMonths td:last-child { text-align: left; }
+@media (max-width: 1280px) { .dist { width: 90px; } }

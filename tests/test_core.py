@@ -421,3 +421,29 @@ def test_mp_mz_priority_and_order_expand():
     o = {x["order_no"]: x for x in list_orders(engine, today=today)}
     assert o["1200000071"]["mp_rub"] == 3000.5 and o["1200000071"]["priority"] == round(3000.5 * 30)
     assert [x["pos"] for x in list_positions(engine, filters=Filters.from_query(order="1200000072"), today=today)["rows"]] == ["10"]
+
+
+def test_stats_otd_by_first_date():
+    """Отчёт по срокам: OTD к первой дате клиента, распределение по декадам опоздания, глубина просрочки, топ заказчиков."""
+    from salesvisor.queries import stats
+
+    engine = make_engine("sqlite:///:memory:")
+    shipped = dict(produced="@08@", shipped="@08@", invoiced="@08@")
+    rows = [seg_row("1200000081", "10", "1", "10 сентября, 2026", **shipped),   # отгружена 08.09 — в срок
+            seg_row("1200000082", "10", "1", "10 сентября, 2026", **shipped),   # отгружена 25.09 — +2 декады
+            seg_row("1200000083", "10", "1", "10 сентября, 2026"),              # не отгружена, дата прошла
+            seg_row("1200000084", "10", "1", "10 ноября, 2026")]                # в работе
+    rows[0]["Факт. дата поставки"] = "8 сентября, 2026"
+    rows[1]["Факт. дата поставки"] = "25 сентября, 2026"
+    rows[2]["Имя заказчика"] = "ООО Бета"
+    load_segments(engine, pd.DataFrame(rows), "d1")
+    load_svetofor(engine, pd.DataFrame([svet_row(o, "10", f, f, "0", "green") for o, f in
+                                        (("1200000081", "1Д09"), ("1200000082", "1Д09"), ("1200000083", "1Д09"), ("1200000084", "1Д11"))]), "d1")
+    s = stats(engine, scope="all", today=date(2026, 9, 30))
+    assert s["summary"]["otd_positions"] == {"ok": 1, "of": 3, "pct": 33.3}
+    assert s["summary"]["otd_orders"]["ok"] == 1 and s["summary"]["otd_orders"]["of"] == 3
+    sep = next(m for m in s["by_month"] if m["month"] == "2026-09")
+    assert (sep["в срок"], sep["+2 декады"], sep["не выполнено"], sep["positions"]) == (1, 1, 1, 3)
+    assert next(m for m in s["by_month"] if m["month"] == "2026-11")["в работе"] == 1
+    assert {d["bucket"]: d["positions"] for d in s["depth"]}["11–30 дн."] == 1  # срок 10.09, сегодня 30.09 — 20 дней
+    assert s["top_customers"][0]["customer"] in ("ООО Альфа", "ООО Бета") and s["top_customers"][0]["bad"] >= 1

@@ -88,6 +88,7 @@
     document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x === b));
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
     if (b.dataset.tab === 'changes') loadChanges();
+    if (b.dataset.tab === 'stats') loadStats().catch(err => { $('#statsEmpty').hidden = false; $('#statsEmpty').textContent = 'Не удалось посчитать: ' + err.message; });
     if (b.dataset.tab === 'day') loadDay().catch(showDayErr);
     if (b.dataset.tab === 'disp') loadDisp().catch(err => { $('#dispEmpty').hidden = false; $('#dispEmpty').textContent = 'Не удалось загрузить: ' + err.message; });
   }));
@@ -947,6 +948,71 @@
     downloadCsv(`SalesVisor_изменения_${stamp()}.csv`, ['Когда', 'Заказ', 'Поз.', 'Клиент', 'Менеджер', 'Изделие', 'Что', 'Было', 'Стало'],
       (state.changesRows || []).map(c => [fmtDT(c.at), c.order_no, c.pos, c.customer || '', c.manager || '', c.product || '',
         c.field_name, fmtVal(c.old), fmtVal(c.new)]));
+  });
+
+  // ---------- статистика и отчёт по срокам ----------
+  const MONTH_RU = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+  const monthName = ym => { const [y, m] = ym.split('-'); return `${MONTH_RU[+m - 1]} ${y}`; };
+  const pctTxt = v => (v == null ? '—' : num(v, 1) + '%');
+  const BUCKETS = ['в срок', '+1 декада', '+2 декады', '+3 декады', '+4 и больше'];
+  async function loadStats() {
+    const p = { ...baseParams(), ...filterParams() };
+    if ($('#statsShipped').checked) p.scope = 'all';
+    $('#statsNote').textContent = 'Считаю…';
+    state.stats = await api('api/stats?' + new URLSearchParams(p));
+    renderStats();
+  }
+  function table(sel, head, rows) {
+    $(sel).innerHTML = `<thead><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>`
+      + (rows.length ? rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${head.length}" class="muted">Нет данных</td></tr>`)
+      + '</tbody>';
+  }
+  function renderStats() {
+    const d = state.stats, s = d.summary;
+    $('#statsNote').textContent = describeFilters().replace(/^Отбор: (Заказы|Позиции); [^;]*/, 'Отбор: ' + ($('#statsShipped').checked ? 'вместе с отгруженными' : $('#scope').options[$('#scope').selectedIndex].text))
+      + ` · на ${fmt(d.today)}. Отбор задаётся на вкладке «Заказы».`;
+    $('#statsEmpty').hidden = s.positions > 0;
+    $('#statsEmpty').textContent = 'Под отбор ничего не попало.';
+    const tiles = [
+      ['', 'Заказов', num(s.orders, 0)], ['', 'Позиций', num(s.positions, 0)],
+      [s.otd_positions.pct >= 90 ? 'ok' : 'late', `OTD позиций (${s.otd_positions.ok} из ${s.otd_positions.of})`, pctTxt(s.otd_positions.pct)],
+      [s.otd_orders.pct >= 90 ? 'ok' : 'late', `OTD заказов (${s.otd_orders.ok} из ${s.otd_orders.of})`, pctTxt(s.otd_orders.pct)],
+      ['late', 'Просрочено позиций', num(s.overdue, 0)],
+      ['', `ГП, км (отгружено ${num(s.km_shipped, 0)})`, num(s.km_plan, 0)],
+      ['', 'МП, млн ₽', num(s.mp_rub / 1e6, 1)], ['', 'Ср. смещение, дн.', num(s.avg_shift, 1)],
+    ];
+    $('#statsTiles').innerHTML = tiles.map(([c, l, v]) => `<div class="tile ${c}" style="cursor:default"><div class="n">${v}</div><div class="l">${esc(l)}</div></div>`).join('');
+    const COLORS = ['#2b8a3e', '#e0a800', '#f08c00', '#d9480f', '#c62828'];
+    $('#statsMonths tbody').innerHTML = d.by_month.map(m => {
+      const total = m.positions || 1;
+      const seg = [...BUCKETS.map((b, i) => [m[b], COLORS[i], b]), [m['не выполнено'], '#7a0000', 'не выполнено'], [m['в работе'], '#c9ced6', 'в работе']]
+        .filter(x => x[0]).map(([v, c, b]) => `<i style="width:${(100 * v / total).toFixed(1)}%;background:${c}" title="${esc(b)}: ${v}"></i>`).join('');
+      return `<tr><td>${monthName(m.month)}</td><td>${m.orders}</td><td>${m.positions}</td><td>${num(m.km, 0)}</td>
+        ${BUCKETS.map(b => `<td>${m[b] || ''}</td>`).join('')}<td class="${m['не выполнено'] ? 'pct-low' : ''}">${m['не выполнено'] || ''}</td><td>${m['в работе'] || ''}</td>
+        <td class="${m.otd_pct == null ? '' : m.otd_pct >= 90 ? 'pct-ok' : m.otd_pct >= 70 ? 'pct-mid' : 'pct-low'}">${pctTxt(m.otd_pct)}</td>
+        <td>${m.avg_shift ?? '—'}</td><td>${num(m.mp_rub / 1e6, 1)}</td><td><span class="dist">${seg}</span></td></tr>`;
+    }).join('') || '<tr><td colspan="15" class="muted">Нет позиций с первой датой</td></tr>';
+    table('#statsDepth', ['Просрочено на', 'Позиций'], d.depth.map(x => [esc(x.bucket), x.positions || '']));
+    table('#statsCustomers', ['Заказчик', 'Не в срок', 'Из позиций', '%', 'МП, млн ₽'],
+      d.top_customers.map(c => [esc(c.customer), c.bad, c.positions, pctTxt(c.pct_bad), num(c.mp_rub / 1e6, 1)]));
+    table('#statsDepts', ['Направление', 'Позиций', 'Просрочено', 'OTD, %'], d.by_dept.map(x => [esc(x.dept), x.positions, x.overdue || '', pctTxt(x.otd_pct)]));
+    table('#statsRejects', ['Причина', 'Позиций'], d.rejects.map(x => [esc(x.code), x.positions]));
+    table('#statsLines', ['Линия', 'Позиций', 'Просрочено', 'ГП, км'], d.lines.map(x => [esc(x.line), x.positions, x.overdue || '', num(x.km, 0)]));
+  }
+  $('#statsShipped').addEventListener('change', () => loadStats().catch(showErr));
+  $('#statsExport').addEventListener('click', () => {
+    const d = state.stats;
+    if (!d) return;
+    const rows = [['Отчёт по срокам', $('#statsNote').textContent], [],
+      ['Месяц', 'Заказов', 'Позиций', 'ГП, км', ...BUCKETS, 'Не выполнено', 'В работе', 'OTD, %', 'Ср. смещение, дн.', 'МП, руб'],
+      ...d.by_month.map(m => [monthName(m.month), m.orders, m.positions, m.km, ...BUCKETS.map(b => m[b]), m['не выполнено'], m['в работе'],
+        m.otd_pct ?? '', m.avg_shift ?? '', m.mp_rub]),
+      [], ['Глубина просрочки', 'Позиций'], ...d.depth.map(x => [x.bucket, x.positions]),
+      [], ['Заказчик', 'Не в срок', 'Из позиций', '%', 'МП, руб'], ...d.top_customers.map(c => [c.customer, c.bad, c.positions, c.pct_bad, c.mp_rub]),
+      [], ['Направление', 'Позиций', 'Просрочено', 'OTD, %'], ...d.by_dept.map(x => [x.dept, x.positions, x.overdue, x.otd_pct ?? '']),
+      [], ['Причина отклонения', 'Позиций'], ...d.rejects.map(x => [x.code, x.positions]),
+      [], ['Линия', 'Позиций', 'Просрочено', 'ГП, км'], ...d.lines.map(x => [x.line, x.positions, x.overdue, x.km])];
+    downloadCsv(`SalesVisor_статистика_${stamp()}.csv`, rows[0], rows.slice(1));
   });
 
   // ---------- загрузка ----------

@@ -574,3 +574,140 @@ def _disp_mismatch(r: dict) -> str | None:
     if produced and not ready:
         return "по отрезкам произведён, в диспетчерском не готов"
     return None
+
+
+# ---------------------------------------------------------------- статистика и отчёт по срокам (30.09.2026)
+# По образцу пилота VOLS-Zakazy (compute_stats) и методики отчёта Правлению: якорь — первая дата клиента
+# (конец первой декады светофора); позиция «в срок» — отгружена не позже якоря; заказ «в срок» — все его позиции
+# с наступившим якорем отгружены в срок; знаменатель OTD — позиции (заказы), у которых якорь уже наступил.
+# Отгрузка — по фактическим датам отчёта по отрезкам (в SalesVisor нет выпуска ОТК и снимков приёмки ПДО).
+
+LATE_BUCKETS = ["в срок", "+1 декада", "+2 декады", "+3 декады", "+4 и больше"]
+DEPTH_BUCKETS = [(10, "1–10 дн."), (30, "11–30 дн."), (60, "31–60 дн."), (90, "61–90 дн."), (180, "91–180 дн."), (None, "больше 180 дн.")]
+
+
+def _decade_index(d: date) -> int:
+    return d.year * 36 + (d.month - 1) * 3 + (0 if d.day <= 10 else 1 if d.day <= 20 else 2)
+
+
+def _km(p: dict) -> float:
+    return (p.get("length_plan") or 0) if (p.get("unit") or "").upper() in ("КМ", "KM") else 0.0
+
+
+def _pos_result(p: dict, today: date) -> str:
+    """Итог позиции к первой дате клиента: «в срок», «+N декад», «не выполнено» (якорь прошёл, не отгружена),
+    «в работе» (якорь не наступил), «нет даты» (нет первой декады), «отгружено, дата неизвестна»."""
+    first = _date(p.get("first_decade_end"))
+    if not first:
+        return "нет даты"
+    if p.get("closed"):
+        shipped = _date(p.get("last_fact_ship_date"))
+        if not shipped:
+            return "отгружено, дата неизвестна"
+        k = _decade_index(shipped) - _decade_index(first)
+        return LATE_BUCKETS[min(max(k, 0), 4)]
+    return "не выполнено" if first < today else "в работе"
+
+
+def stats(engine: Engine, *, scope: str = "all", manager: str = "", dept: str = "", filters: Filters | None = None,
+          today: date | None = None) -> dict:
+    today = today or date.today()
+    rows = _filtered_positions(engine, scope, manager, dept, filters or Filters(), today)
+    for p in rows:
+        p["_res"] = _pos_result(p, today)
+    due = [p for p in rows if _date(p.get("first_decade_end")) and _date(p["first_decade_end"]) <= today]
+    on_time = [p for p in due if p["_res"] == "в срок"]
+    by_order = defaultdict(list)
+    for p in due:
+        by_order[p["order_no"]].append(p)
+    orders_on_time = sum(1 for ps in by_order.values() if all(p["_res"] == "в срок" for p in ps))
+    pct = lambda a, b: round(100 * a / b, 1) if b else None
+
+    summary = {
+        "orders": len({p["order_no"] for p in rows}), "positions": len(rows),
+        "positions_open": sum(1 for p in rows if not p.get("closed")),
+        "overdue": sum(1 for p in rows if p["overdue"]),
+        "km_plan": round(sum(_km(p) for p in rows), 1), "km_shipped": round(sum(_km(p) for p in rows if p.get("closed")), 1),
+        "amount_rub": round(sum(p.get("amount_rub") or 0 for p in rows)),
+        "mp_rub": round(sum(p.get("mp_rub") or 0 for p in rows)), "mz_rub": round(sum(p.get("mz_rub") or 0 for p in rows)),
+        "otd_positions": {"ok": len(on_time), "of": len(due), "pct": pct(len(on_time), len(due))},
+        "otd_orders": {"ok": orders_on_time, "of": len(by_order), "pct": pct(orders_on_time, len(by_order))},
+        "avg_shift": round(sum(p["shift_days"] for p in rows if p.get("shift_days") is not None)
+                           / max(1, sum(1 for p in rows if p.get("shift_days") is not None)), 1),
+    }
+
+    # по месяцам первой даты клиента — отчёт по срокам: принятое к сроку и его исполнение
+    months: dict[str, dict] = {}
+    for p in rows:
+        first = _date(p.get("first_decade_end"))
+        if not first:
+            continue
+        m = months.setdefault(first.strftime("%Y-%m"), {"month": first.strftime("%Y-%m"), "positions": 0, "orders": set(),
+                                                         "km": 0.0, "mp_rub": 0.0, "shift_sum": 0, "shift_n": 0,
+                                                         **{b: 0 for b in LATE_BUCKETS}, "не выполнено": 0, "в работе": 0,
+                                                         "отгружено, дата неизвестна": 0})
+        m["positions"] += 1
+        m["orders"].add(p["order_no"])
+        m["km"] += _km(p)
+        m["mp_rub"] += p.get("mp_rub") or 0
+        if p.get("shift_days") is not None:
+            m["shift_sum"] += p["shift_days"]
+            m["shift_n"] += 1
+        m[p["_res"]] = m.get(p["_res"], 0) + 1
+    by_month = []
+    for m in sorted(months.values(), key=lambda x: x["month"]):
+        done = sum(m[b] for b in LATE_BUCKETS)
+        by_month.append({**{k: v for k, v in m.items() if k not in ("orders", "shift_sum", "shift_n")},
+                         "orders": len(m["orders"]), "km": round(m["km"], 1), "mp_rub": round(m["mp_rub"]),
+                         "avg_shift": round(m["shift_sum"] / m["shift_n"], 1) if m["shift_n"] else None,
+                         "otd_pct": pct(m["в срок"], done + m["не выполнено"])})
+
+    # глубина просрочки: открытые позиции, у которых срок сейчас прошёл
+    depth = {label: 0 for _, label in DEPTH_BUCKETS}
+    for p in rows:
+        d = _date(p.get("due_date"))
+        if p["overdue"] and d:
+            days = (today - d).days
+            depth[next(label for lim, label in DEPTH_BUCKETS if lim is None or days <= lim)] += 1
+
+    # топ заказчиков по невыполнению: отгружено позже первой даты или не отгружено, хотя дата прошла
+    bad = lambda p: p["_res"] not in ("в срок", "в работе", "нет даты", "отгружено, дата неизвестна")
+    cust: dict[str, dict] = {}
+    for p in due:
+        c = cust.setdefault(p.get("customer") or "—", {"customer": p.get("customer") or "—", "positions": 0, "bad": 0, "mp_rub": 0.0})
+        c["positions"] += 1
+        if bad(p):
+            c["bad"] += 1
+            c["mp_rub"] += p.get("mp_rub") or 0
+    top = sorted((c for c in cust.values() if c["bad"]), key=lambda c: (-c["bad"], -c["mp_rub"]))[:10]
+    for c in top:
+        c["mp_rub"] = round(c["mp_rub"])
+        c["pct_bad"] = pct(c["bad"], c["positions"])
+
+    # направления (отдел сбыта), причины отклонения, линии
+    due_ids = {id(p) for p in due}
+    dirs: dict[str, dict] = {}
+    for p in rows:
+        d = dirs.setdefault(p.get("sales_dept") or "—", {"dept": p.get("sales_dept") or "—", "positions": 0, "overdue": 0, "due": 0, "ok": 0})
+        d["positions"] += 1
+        d["overdue"] += int(p["overdue"])
+        if id(p) in due_ids:
+            d["due"] += 1
+            d["ok"] += int(p["_res"] == "в срок")
+    by_dept = sorted(({**d, "otd_pct": pct(d["ok"], d["due"])} for d in dirs.values()), key=lambda d: -d["positions"])
+    rejects = defaultdict(int)
+    lines: dict[str, dict] = {}
+    for p in rows:
+        if p.get("closed"):
+            continue
+        rejects[p.get("reject_code") or "(пусто)"] += 1
+        if p.get("line"):
+            ln = lines.setdefault(p["line"], {"line": p["line"], "positions": 0, "overdue": 0, "km": 0.0})
+            ln["positions"] += 1
+            ln["overdue"] += int(p["overdue"])
+            ln["km"] += _km(p)
+    return {"today": today.isoformat(), "summary": summary, "by_month": by_month,
+            "depth": [{"bucket": k, "positions": v} for k, v in depth.items()],
+            "top_customers": top, "by_dept": by_dept,
+            "rejects": sorted(({"code": k, "positions": v} for k, v in rejects.items()), key=lambda x: -x["positions"]),
+            "lines": sorted(({**ln, "km": round(ln["km"], 1)} for ln in lines.values()), key=lambda x: -x["positions"])}
