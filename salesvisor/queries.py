@@ -1,6 +1,7 @@
 """Выборки для интерфейса: заказы, карточка заказа, лента изменений."""
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -95,6 +96,12 @@ def stage_group(stage: str | None) -> str:
     return _STAGE_OF.get(s, "none")
 
 
+# ГОЗ и ВПК — по префиксу номенклатуры, как в аналитике продаж (ГОЗ, ГОЗ12…, ВПК, TEA)
+_GOZ = re.compile(r"^\s*(ГОЗ|ВПК|TEA)", re.IGNORECASE)
+# внутренние заказы площадки: ООО «Инкаб» (Дальний Восток и другие юрлица группы — не внутренние, решение пилота)
+_INKAB = re.compile(r"^\s*ООО\s*[\"«]?\s*Инкаб\s*[\"»]?\s*$", re.IGNORECASE)
+
+
 def _date(v) -> date | None:
     try:
         return date.fromisoformat(v) if v else None
@@ -116,7 +123,9 @@ class Filters:
     first_from: date | None = None  # первая обещанная клиенту дата — с
     first_to: date | None = None    # — по
     shift_min: int | None = None  # смещение от первой даты, дней, не меньше
-    flags: frozenset = frozenset()  # overdue, quality, nolink, comments, noline, plan (есть в плане производства)
+    reject: str = ""              # причина отклонения SAP: коды через запятую, «-» — пусто; «!» в начале — кроме них
+    flags: frozenset = frozenset()  # overdue, quality, nolink, comments, noline, plan (есть в плане производства),
+                                    # goz (ГОЗ/ВПК по изделию), noinkab (без внутренних ООО «Инкаб»)
 
     @classmethod
     def from_query(cls, **kw) -> "Filters":
@@ -127,6 +136,7 @@ class Filters:
                    due_from=_date(kw.get("due_from")), due_to=_date(kw.get("due_to")),
                    first_from=_date(kw.get("first_from")), first_to=_date(kw.get("first_to")),
                    shift_min=int(shift) if shift.lstrip("-").isdigit() else None,
+                   reject=(kw.get("reject") or "").strip().upper(),
                    flags=frozenset(f for f in (kw.get("flags") or "").split(",") if f))
 
     def match(self, p: dict) -> bool:
@@ -147,10 +157,16 @@ class Filters:
             return False
         if self.shift_min is not None and (p.get("shift_days") or 0) < self.shift_min:
             return False
+        if self.reject:
+            codes = self.reject.lstrip("!").split(",")
+            if ((p.get("reject_code") or "-").upper() in codes) == self.reject.startswith("!"):
+                return False
         f = self.flags
         return not (("overdue" in f and not p["overdue"]) or ("quality" in f and not p["quality"])
                     or ("nolink" in f and (p["bitrix_task"] or p["bitrix_deal"])) or ("comments" in f and not p["comments"])
-                    or ("noline" in f and p.get("line")) or ("plan" in f and not p.get("line")))
+                    or ("noline" in f and p.get("line")) or ("plan" in f and not p.get("line"))
+                    or ("goz" in f and not _GOZ.match(p.get("product") or ""))
+                    or ("noinkab" in f and _INKAB.match(p.get("customer") or "")))
 
 
 # Поля позиции для ленты «Позиции» и выгрузки — только то, что показывает и по чему отбирает интерфейс
@@ -158,7 +174,7 @@ POSITION_FIELDS = ("order_no", "pos", "customer", "sales_dept", "manager", "prod
                    "first_decade_end", "current_decade", "current_decade_end", "due_date", "shift_days", "required_date",
                    "plan_ship_date", "invoice_plan_date", "line", "plan_end_date", "plan_end_time", "stage",
                    "segments_total", "segments_ready", "overdue", "stale", "disp_decade", "disp_ready", "length_plan",
-                   "unit", "amount_rub", "quality", "comments", "bitrix_task", "bitrix_deal")
+                   "unit", "amount_rub", "quality", "comments", "bitrix_task", "bitrix_deal", "reject_code", "reject_text")
 
 
 def _filtered_positions(engine: Engine, scope: str, manager: str, dept: str, f: Filters, today: date) -> list[dict]:
@@ -261,23 +277,27 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
             "lines": sorted({p["line"] for p in ps if p.get("line")}),
             "stages": sorted({p["stage"] for p in ps if p.get("stage")}),
         }
-        if color == "quality":
-            if not order["quality"]:
-                continue
-        elif color and color != "nolink" and (color != "none" and order["color"] != color or color == "none" and order["color"]):
-            continue
-        if color == "nolink":
-            if order["bitrix_task"] or order["bitrix_deal"]:
-                continue
-        elif color == "quality":
-            pass
-        elif overdue_only and not order["overdue"]:
+        if overdue_only and not order["overdue"] or color and not _tile_match(order, color, today):
             continue
         out.append(order)
 
     # Сверху просроченные, потом красные, жёлтые, внутри — по величине смещения
     out.sort(key=lambda o: (0 if o["overdue"] else 1, COLOR_RANK.get(o["color"], 3), -(o["max_shift"] or 0), o["nearest_due"] or "9999"))
     return out
+
+
+def _tile_match(o: dict, tile: str, today: date) -> bool:
+    """Плитки списка заказов — как в интерфейсе: цвет, без светофора, без Битрикс24, несоответствия, срок ≤ 7 дней."""
+    if tile == "none":
+        return not o["color"]
+    if tile == "nolink":
+        return not (o["bitrix_task"] or o["bitrix_deal"])
+    if tile == "quality":
+        return o["quality"] > 0
+    if tile == "soon":
+        due = _date(o["nearest_due"])
+        return bool(due and today <= due <= today + timedelta(days=7) and o["segments_ready"] < o["segments_total"])
+    return o["color"] == tile
 
 
 def _effective_task(link, ps):
@@ -359,7 +379,11 @@ def meta(engine: Engine) -> dict:
             select(snapshots.c.source, snapshots.c.loaded_at).order_by(snapshots.c.loaded_at))}
         lines = sorted({r[0] for r in conn.execute(select(positions.c.line).where(positions.c.line.is_not(None))) if r[0]})
         quality_total = conn.execute(select(func.count()).select_from(quality_msgs)).scalar()
-    return {"managers": managers, "depts": depts, "customers": customers, "lines": lines, "last_load": last, "today": date.today().isoformat(),
+        rejects = {r[0]: r[1] for r in conn.execute(select(positions.c.reject_code, func.max(positions.c.reject_text))
+                                                   .where(positions.c.closed.is_(False), positions.c.reject_code.is_not(None))
+                                                   .group_by(positions.c.reject_code))}
+    return {"managers": managers, "depts": depts, "customers": customers, "lines": lines,
+            "rejects": [{"code": k, "text": v} for k, v in sorted(rejects.items())], "last_load": last, "today": date.today().isoformat(),
             "quality_total": quality_total}
 
 

@@ -338,3 +338,24 @@ def test_filters_sort_and_export():
     assert ws["K3"].number_format == "DD.MM.YYYY"
     x = client.get("/api/export.xlsx?view=orders&color=red")
     assert load_workbook(io.BytesIO(x.content)).active.max_row == 3
+
+
+def test_reject_goz_inkab_and_soon_tile():
+    """Причина отклонения, ГОЗ по префиксу изделия, внутренние заказы ООО «Инкаб», плитка «Срок ≤ 7 дней»."""
+    from salesvisor.queries import Filters, list_orders, list_positions
+
+    engine = make_engine("sqlite:///:memory:")
+    rows = [seg_row("1200000051", "10", "1", "3 октября, 2026"), seg_row("1200000052", "10", "1", "25 октября, 2026"),
+            seg_row("1200000053", "10", "1", "25 октября, 2026")]
+    rows[0].update({"Причина отклонения": "Z6", "Описание Причины отклонения": "Прогноз", "Материал": "ГОЗ12 ТОС2-П"})
+    rows[1].update({"Имя заказчика": 'ООО "Инкаб"', "Материал": "ОК-БС-01"})
+    rows[2].update({"Имя заказчика": 'ООО "ИНКАБ ДАЛЬНИЙ ВОСТОК"', "Причина отклонения": "Z4", "Материал": "ВПК ОКЛ"})
+    load_segments(engine, pd.DataFrame(rows), "d1")
+    today = date(2026, 9, 30)
+    nums = lambda f: sorted(p["order_no"] for p in list_positions(engine, filters=Filters.from_query(**f), today=today)["rows"])
+    assert nums({"reject": "Z6"}) == ["1200000051"]
+    assert nums({"reject": "-"}) == ["1200000052"]
+    assert nums({"reject": "!Z6,Z7"}) == ["1200000052", "1200000053"]
+    assert nums({"flags": "goz"}) == ["1200000051", "1200000053"]
+    assert nums({"flags": "noinkab"}) == ["1200000051", "1200000053"]  # Дальний Восток не внутренний
+    assert [o["order_no"] for o in list_orders(engine, color="soon", today=today)] == ["1200000051"]

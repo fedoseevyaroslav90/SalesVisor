@@ -57,6 +57,7 @@ POSITION_COLUMNS = [
     ("План. окончание", 12, lambda p: p.get("plan_end_date")),
     ("Время окончания", 9, lambda p: p.get("plan_end_time")),
     ("Этап", 22, lambda p: p.get("stage")),
+    ("Причина отклонения", 10, lambda p: p.get("reject_code")),
     ("Отрезков готово", 10, lambda p: p.get("segments_ready")),
     ("Отрезков всего", 10, lambda p: p.get("segments_total")),
     ("Длина", 10, lambda p: p.get("length_plan")),

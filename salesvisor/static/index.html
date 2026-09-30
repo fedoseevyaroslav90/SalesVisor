@@ -37,6 +37,8 @@
         </select></label>
         <button class="btn secondary" id="filtersToggle" aria-expanded="true">Отбор <b id="filtersCount" hidden></b></button>
         <span class="toolbar-end">
+          <select id="savedViews" title="Сохранённые отборы — хранятся в этом браузере"><option value="">Мои отборы…</option></select>
+          <button class="btn secondary" id="saveView" title="Запомнить текущий отбор под своим названием">Сохранить отбор</button>
           <button class="btn secondary" id="copyLink" title="Скопировать ссылку на этот отбор — коллега с доступом откроет то же самое">Ссылка на отбор</button>
           <button class="btn" id="exportBtn" title="Все строки текущего отбора в том же порядке, с фильтрами в шапке">Скачать в Excel</button>
         </span>
@@ -75,12 +77,17 @@
         </select></label>
         <span class="period" id="fFirstPeriod" hidden><input type="date" id="fFirstFrom" aria-label="Первая дата с"> — <input type="date" id="fFirstTo" aria-label="Первая дата по"></span>
         <label>Смещение от <input id="fShift" type="number" min="0" step="10" placeholder="0"> дн.</label>
+        <label title="Причина отклонения SAP по регламенту: Z4 — готов к производству, Z6 — прогноз, Z7 — бизнес-план, пусто — принят в производство">Причина откл. <select id="fReject">
+          <option value="">Любая</option>
+        </select></label>
         <span class="flags-group">
           <label class="check"><input type="checkbox" data-flag="overdue"> просрочено</label>
           <label class="check"><input type="checkbox" data-flag="quality"> несоответствия</label>
           <label class="check"><input type="checkbox" data-flag="nolink"> без Битрикс24</label>
           <label class="check"><input type="checkbox" data-flag="comments"> с комментариями</label>
           <label class="check"><input type="checkbox" data-flag="plan"> в плане производства</label>
+          <label class="check" title="Изделие начинается с ГОЗ, ВПК или TEA — как в аналитике продаж"><input type="checkbox" data-flag="goz"> ГОЗ / ВПК</label>
+          <label class="check" title="Скрыть заказы, где клиент — ООО «Инкаб» (Дальний Восток и другие юрлица остаются)"><input type="checkbox" data-flag="noinkab"> без внутренних ООО «Инкаб»</label>
         </span>
         <button class="linkish-btn" id="fReset">Сбросить отбор</button>
       </div>

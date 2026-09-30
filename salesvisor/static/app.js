@@ -42,6 +42,11 @@
     $('#fLine').innerHTML = '<option value="">Все</option><option value="-">Не в плане производства</option>'
       + (state.meta.lines || []).map(v => `<option>${esc(v)}</option>`).join('');
     $('#fLine').value = line;
+    const rej = $('#fReject').value;
+    $('#fReject').innerHTML = '<option value="">Любая</option>'
+      + (state.meta.rejects || []).map(r => `<option value="${esc(r.code)}">${esc(r.code)} — ${esc(r.text || '')}</option>`).join('')
+      + '<option value="-">(пусто) — принят в производство</option><option value="!Z6,Z7">Кроме прогноза и бизнес-плана (Z6, Z7)</option>';
+    $('#fReject').value = rej;
     $('#customerList').innerHTML = (state.meta.customers || []).map(v => `<option value="${esc(v)}">`).join('');
     const loadTab = document.querySelector('.tabs button[data-tab="load"]');
     if (loadTab) loadTab.hidden = state.meta.can_upload === false;
@@ -122,6 +127,7 @@
       if (r && r[1]) p[key + '_to'] = r[1];
     }
     if (v('#fShift')) p.shift_min = v('#fShift');
+    if (v('#fReject')) p.reject = v('#fReject');
     const flags = flagInputs().filter(i => i.checked).map(i => i.dataset.flag);
     if (flags.length) p.flags = flags.join(',');
     return p;
@@ -131,7 +137,7 @@
     const text = sel => { const el = $(sel); return el.tagName === 'SELECT' ? el.options[el.selectedIndex]?.text : el.value; };
     const parts = [state.view === 'orders' ? 'Заказы' : 'Позиции', text('#scope')];
     for (const [sel, name] of [['#manager', 'менеджер'], ['#dept', 'отдел'], ['#search', 'поиск'], ['#fCustomer', 'клиент'],
-      ['#fLine', 'линия'], ['#fStage', 'этап'], ['#fShift', 'смещение от, дн.']]) if ($(sel).value) parts.push(`${name}: ${text(sel)}`);
+      ['#fLine', 'линия'], ['#fStage', 'этап'], ['#fShift', 'смещение от, дн.'], ['#fReject', 'причина откл.']]) if ($(sel).value) parts.push(`${name}: ${text(sel)}`);
     const p = filterParams();
     if (p.due_from || p.due_to) parts.push(`срок: ${p.due_from ? fmt(p.due_from) : '…'}–${p.due_to ? fmt(p.due_to) : '…'}`);
     if (p.first_from || p.first_to) parts.push(`первая дата: ${p.first_from ? fmt(p.first_from) : '…'}–${p.first_to ? fmt(p.first_to) : '…'}`);
@@ -141,27 +147,30 @@
     return 'Отбор: ' + parts.join('; ');
   }
 
-  // Отбор живёт в адресе страницы (#…): ссылку можно отправить коллеге, после обновления страницы он сохраняется
-  const HASH = { scope: '#scope', manager: '#manager', dept: '#dept', q: '#search', customer: '#fCustomer', line: '#fLine',
+  // Отбор живёт в адресе страницы (?…): ссылку можно отправить коллеге, после обновления страницы он сохраняется.
+  // Не во фрагменте #…: заставка входа портала перезагружает страницу переходом на тот же адрес, а переход,
+  // отличающийся только фрагментом, браузер страницей не перезагружает — открывший ссылку без сеанса завис бы.
+  const URL_FIELDS = { scope: '#scope', manager: '#manager', dept: '#dept', q: '#search', customer: '#fCustomer', line: '#fLine',
     stage: '#fStage', due: '#fDue', due_from: '#fDueFrom', due_to: '#fDueTo', first: '#fFirst', first_from: '#fFirstFrom',
-    first_to: '#fFirstTo', shift: '#fShift' };
-  function saveHash() {
+    first_to: '#fFirstTo', shift: '#fShift', reject: '#fReject' };
+  function saveUrl() {
     const h = new URLSearchParams();
     if (state.view !== 'orders') h.set('view', state.view);
-    for (const [k, sel] of Object.entries(HASH)) if ($(sel).value && !(k === 'scope' && $(sel).value === 'open')) h.set(k, $(sel).value);
+    for (const [k, sel] of Object.entries(URL_FIELDS)) if ($(sel).value && !(k === 'scope' && $(sel).value === 'open')) h.set(k, $(sel).value);
     const flags = flagInputs().filter(i => i.checked).map(i => i.dataset.flag);
     if (flags.length) h.set('flags', flags.join(','));
     if (state.view === 'orders' && (state.color || state.overdue)) h.set('tile', state.overdue ? 'late' : state.color);
     const sort = state.view === 'orders' ? state.sort : state.posSort;
     if (sort) h.set('sort', sort);
     const s = h.toString();
-    history.replaceState(null, '', location.pathname + location.search + (s ? '#' + s : ''));
+    history.replaceState(null, '', location.pathname + (s ? '?' + s : ''));
     store.set('lastView', s);  // открыл раздел без ссылки — вернётся его последний отбор
   }
-  function readHash() {
-    const h = new URLSearchParams(location.hash.slice(1) || store.get('lastView'));
+  function readUrl() {
+    // старые ссылки с #… тоже открываются
+    const h = new URLSearchParams(location.search.slice(1) || location.hash.slice(1) || store.get('lastView'));
     if (![...h.keys()].length) return;
-    for (const [k, sel] of Object.entries(HASH)) if (h.has(k)) $(sel).value = h.get(k);
+    for (const [k, sel] of Object.entries(URL_FIELDS)) if (h.has(k)) $(sel).value = h.get(k);
     const flags = (h.get('flags') || '').split(',');
     flagInputs().forEach(i => { i.checked = flags.includes(i.dataset.flag); });
     const tile = h.get('tile') || '';
@@ -186,7 +195,7 @@
 
   async function loadOrders() {
     markFilters();
-    saveHash();
+    saveUrl();
     const seq = ++state.seq;  // быстрый ввод: устаревший ответ не перерисовывает новый отбор
     if (state.view === 'positions') return loadPositions(false, seq);
     const orders = await api('api/orders?' + new URLSearchParams({ ...baseParams(), ...filterParams() }));
@@ -205,9 +214,17 @@
     renderPositions();
   }
 
+  // срок наступает в ближайшие 7 дней, а отгружено ещё не всё (плитка «Мои заказы» пилота VOLS-Zakazy)
+  function soon(o) {
+    if (!o.nearest_due) return false;
+    const today = state.meta.today || isoDate(new Date());
+    const t = new Date(today + 'T00:00');
+    t.setDate(t.getDate() + 7);
+    return o.nearest_due >= today && o.nearest_due <= isoDate(t) && o.segments_ready < o.segments_total;
+  }
   function tileRows(all) {
     return all.filter(o => (state.overdue ? o.overdue : true) &&
-      (!state.color || (state.color === 'none' ? !o.color : state.color === 'nolink' ? !o.bitrix_task && !o.bitrix_deal
+      (!state.color || (state.color === 'none' ? !o.color : state.color === 'soon' ? soon(o) : state.color === 'nolink' ? !o.bitrix_task && !o.bitrix_deal
         : state.color === 'quality' ? o.quality > 0 : o.color === state.color)));
   }
   function render() {
@@ -217,6 +234,7 @@
     const tiles = [
       ['', 'Заказов', all.length],
       ['late', 'С просрочкой', late],
+      ['soon', 'Срок ≤ 7 дней', all.filter(soon).length],
       ['red', 'Красные', n('red')],
       ['yellow', 'Жёлтые', n('yellow')],
       ['green', 'Зелёные', n('green')],
@@ -233,7 +251,7 @@
       state.overdue = c === 'late';
       state.color = c === 'late' ? '' : c;
       state.shown = PAGE;
-      saveHash();
+      saveUrl();
       render();
     }));
 
@@ -282,7 +300,7 @@
         <td class="num ${p.shift_days > 30 ? 'neg' : ''}">${p.shift_days ?? '—'}</td>
         <td>${fmt(p.plan_ship_date || p.invoice_plan_date)}</td>
         <td>${p.line ? `<b>${esc(p.line)}</b><div class="sub">${fmt(p.plan_end_date)} ${esc(p.plan_end_time || '')}</div>` : '<span class="muted">—</span>'}</td>
-        <td>${esc(p.stage)}${p.disp_decade ? `<div class="sub">${esc(p.disp_decade)}</div>` : ''}</td>
+        <td>${esc(p.stage)}${p.reject_code ? ` <span class="sub" title="${esc(p.reject_text || 'причина отклонения')}">${esc(p.reject_code)}</span>` : ''}${p.disp_decade ? `<div class="sub">${esc(p.disp_decade)}</div>` : ''}</td>
         <td>${p.segments_total ? `${p.segments_ready}/${p.segments_total}` : '—'}</td>
         <td>${p.quality ? `<div class="q-tag">несоотв.: ${p.quality}</div>` : ''}${p.comments ? `<span class="sub" title="Комментарии к заказу">💬${p.comments}</span> ` : ''}${bxLink('task', p.bitrix_task)}</td>
       </tr>`).join('');
@@ -305,7 +323,7 @@
     setView(b.dataset.view);
     loadOrders().catch(showErr);
   }));
-  bindSort('#orders', () => state.sort, s => { state.sort = s; state.shown = PAGE; saveHash(); render(); });
+  bindSort('#orders', () => state.sort, s => { state.sort = s; state.shown = PAGE; saveUrl(); render(); });
   bindSort('#positions', () => state.posSort, s => { state.posSort = s; loadOrders().catch(showErr); });
   $('#ordersMore button').addEventListener('click', () => { state.shown += PAGE; render(); });
   $('#positionsMore button').addEventListener('click', () => loadPositions(true).catch(showErr));
@@ -337,6 +355,46 @@
     if (state.view === 'orders') { if (state.overdue) p.overdue = 'true'; else if (state.color) p.color = state.color; }
     location.href = 'api/export.xlsx?' + new URLSearchParams(p);
   });
+  // «Мои отборы»: именованные отборы в этом браузере (пресеты пилота: «мои просрочки», «мой отдел»)
+  const savedViews = () => { try { return JSON.parse(store.get('views') || '[]'); } catch { return []; } };
+  function fillSavedViews() {
+    const list = savedViews();
+    $('#savedViews').innerHTML = '<option value="">Мои отборы…</option>'
+      + list.map((x, i) => `<option value="${i}">${esc(x.name)}</option>`).join('')
+      + (list.length ? '<option value="del">Удалить отбор…</option>' : '');
+  }
+  $('#saveView').addEventListener('click', () => {
+    const name = (window.prompt('Название отбора, например «Мои просрочки»:') || '').trim().slice(0, 60);
+    if (!name) return;
+    const list = savedViews().filter(x => x.name !== name);
+    list.push({ name, query: location.search.slice(1) });
+    store.set('views', JSON.stringify(list.slice(-30)));
+    fillSavedViews();
+  });
+  $('#savedViews').addEventListener('change', e => {
+    const v = e.target.value;
+    e.target.value = '';
+    if (v === 'del') {
+      const name = (window.prompt('Какой отбор удалить? Название:\n' + savedViews().map(x => x.name).join('\n')) || '').trim();
+      store.set('views', JSON.stringify(savedViews().filter(x => x.name !== name)));
+      fillSavedViews();
+      return;
+    }
+    const x = savedViews()[+v];
+    if (!x) return;
+    // отбор целиком из сохранённого: сначала всё сбросить, затем применить его адрес
+    document.querySelectorAll('#filters select, #filters input:not([type=checkbox])').forEach(el => { el.value = ''; });
+    ['#search', '#manager', '#dept'].forEach(id => { $(id).value = ''; });
+    $('#scope').value = 'open';
+    state.sort = ''; state.posSort = ''; state.color = ''; state.overdue = false;
+    const q = x.query ?? x.hash ?? '';
+    history.replaceState(null, '', location.pathname + (q ? '?' + q : ''));
+    readUrl();
+    setView(state.view);
+    loadOrders().catch(showErr);
+  });
+  fillSavedViews();
+
   $('#copyLink').addEventListener('click', async () => {
     const b = $('#copyLink'), was = b.textContent;
     try { await navigator.clipboard.writeText(location.href); b.textContent = 'Ссылка скопирована'; }
@@ -753,5 +811,5 @@
     $('#empty').textContent = 'Не удалось загрузить данные: ' + err.message;
   }
 
-  loadMeta().then(() => { readHash(); setView(state.view); return loadOrders(); }).catch(showErr);
+  loadMeta().then(() => { readUrl(); setView(state.view); return loadOrders(); }).catch(showErr);
 })();

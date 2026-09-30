@@ -42,7 +42,7 @@ main { padding: 16px 20px 40px; }  /* во всю ширину экрана: т�
 .toolbar .check { display: flex; gap: 6px; align-items: center; color: var(--muted); }
 .today { margin-left: auto; color: var(--muted); }
 
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; margin-bottom: 14px; }
 .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; cursor: pointer; text-align: left; }
 .tile.active { outline: 2px solid var(--accent); }
 .tile .n { font-size: 26px; font-weight: 700; }
