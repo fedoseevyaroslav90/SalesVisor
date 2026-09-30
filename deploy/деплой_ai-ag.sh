@@ -48,7 +48,7 @@ if [ "${1:-}" = "--rollback" ]; then
   up "$PREV"
   if ! wait_health; then docker logs --tail 30 salesvisor-web 2>&1 || true; exit 1; fi
   echo "ОТКАТ ВЫПОЛНЕН: работает $PREV (он же теперь $IMG). Схема базы назад не откатывается —"
-  echo "копии базы до выкладок: ls $BASE/backups (восстановление: gunzip -c <файл> | docker exec -i salesvisor-db psql -U salesvisor salesvisor)"
+  echo "копии базы до выкладок: ls $BASE/backups (восстановление: docker exec -i salesvisor-db pg_restore -U salesvisor -d salesvisor --clean < <файл>.dump)"
   exit 0
 fi
 
@@ -94,10 +94,11 @@ fi
 
 # копия базы перед выкладкой (если база уже работает); хранятся 10 последних
 if docker ps --format '{{.Names}}' | grep -qx salesvisor-db; then
-  f="$BASE/backups/salesvisor_$(date +%Y%m%d-%H%M%S)_pre-deploy.sql.gz"
-  docker exec salesvisor-db pg_dump -U salesvisor salesvisor | gzip > "$f"
+  # сжатый формат -Fc без конвейера: сбой pg_dump останавливает выкладку (set -e), а не даёт пустую копию
+  f="$BASE/backups/salesvisor_$(date +%Y%m%d-%H%M%S)_pre-deploy.dump"
+  docker exec salesvisor-db pg_dump -U salesvisor -Fc salesvisor > "$f"
   echo "копия базы: $f ($(du -h "$f" | cut -f1))"
-  ls -1t "$BASE"/backups/*_pre-deploy.sql.gz 2>/dev/null | tail -n +11 | xargs -r rm -f
+  ls -1t "$BASE"/backups/*_pre-deploy.* 2>/dev/null | tail -n +11 | xargs -r rm -f
 fi
 
 # прежний образ — под тег :prev (одно поколение отката без пересборки)
