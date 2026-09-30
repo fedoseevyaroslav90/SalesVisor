@@ -406,6 +406,18 @@
   $('#field').addEventListener('change', renderChanges);
 
   // ---------- загрузка ----------
+  const SOURCE_NAME = { segments: 'Отчёт по отрезкам', svetofor: 'Светофор', plan: 'План производства (ZPP context)', dispatcher: 'Диспетчерский отчёт' };
+  function loadSummary(r) {
+    if (r.source === 'bitrix') return `Битрикс24: комментариев о переносах ${r.comments_for_changes}.`;
+    const parts = [`строк ${r.rows}`, `позиций ${r.positions}`];
+    if (r.new) parts.push(`новых ${r.new}`);
+    parts.push(`изменений ${r.changes ?? 0}`);
+    if (r.not_in_orders) parts.push(`ждут своих позиций (применятся после загрузки отрезков или светофора): ${r.not_in_orders}`);
+    if (r.deferred_applied) parts.push(`применено ждавших строк плана и диспетчерского: ${r.deferred_applied}`);
+    if (r.quality_new) parts.push(`новых несоответствий: ${r.quality_new}`);
+    return `${SOURCE_NAME[r.source] || r.source}: ${parts.join(', ')}.`;
+  }
+
   $('#file').addEventListener('change', async e => {
     const file = e.target.files[0];
     if (!file) return;
@@ -416,7 +428,7 @@
     fd.append('file', file);
     try {
       const r = await api('api/upload', { method: 'POST', body: fd });
-      out.textContent = `${r.source === 'svetofor' ? 'Светофор' : 'Отчёт по отрезкам'}: строк ${r.rows}, позиций ${r.positions}, новых ${r.new}, изменений ${r.changes}.`;
+      out.textContent = loadSummary(r);
       await loadMeta();
       await loadOrders();
     } catch (err) {
@@ -431,7 +443,7 @@
     out.textContent = 'Забираем данные из Metabase…';
     try {
       const r = await api('api/sync', { method: 'POST' });
-      out.textContent = r.map(x => `${x.source}: ${x.positions ?? ''} поз., изменений ${x.changes ?? x.comments_for_changes ?? 0}`).join('; ');
+      out.textContent = r.length ? r.map(loadSummary).join(' ') : 'Новых выгрузок нет.';
       await loadMeta();
       await loadOrders();
     } catch (err) {

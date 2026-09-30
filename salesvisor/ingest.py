@@ -14,7 +14,7 @@ from sqlalchemy import Table, bindparam, delete, insert, select, text, update
 from sqlalchemy.engine import Engine
 
 from . import parsing as p
-from .db import change_log, dispatcher, positions, quality_msgs, segments, snapshots
+from .db import change_log, disp_end_dates, dispatcher, plan_rows, positions, quality_msgs, segments, snapshots
 
 SVETOFOR_REQUIRED = ["Заказ", "Позиция", "Первая декада", "Текущая декада"]
 SEGMENTS_REQUIRED = ["Заказ клиента", "Позиция заказа клиента", "Номер отрезка по порядку в позиции", "Треб. дата поставки"]
@@ -477,7 +477,8 @@ def load_svetofor(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
         conn.execute(update(positions).values(in_svetofor=False))
         stats = _upsert(conn, rows, TRACKED_SVETOFOR, sid)
         _fill_order_managers(conn)
-    return {"source": "svetofor", "rows": len(df), "positions": len(rows), **stats}
+        deferred = _apply_deferred(conn, sid)
+    return {"source": "svetofor", "rows": len(df), "positions": len(rows), "deferred_applied": deferred, **stats}
 
 
 def load_segments(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
@@ -490,20 +491,24 @@ def load_segments(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
             conn.execute(insert(segments), segs[i:i + 5000])
         stats = _upsert(conn, pos_rows, TRACKED_SEGMENTS, sid)
         _fill_order_managers(conn)
-    return {"source": "segments", "rows": len(df), "positions": len(pos_rows), **stats}
+        deferred = _apply_deferred(conn, sid)
+    return {"source": "segments", "rows": len(df), "positions": len(pos_rows), "deferred_applied": deferred, **stats}
 
 
 def load_plan(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
     # Позиции, которых нет в свежем плане, не трогаем: в ZPP context только ближайший горизонт.
     # Сдвиги окончания и смена линии между прогонами ППМ попадают в журнал изменений
     rows, msgs = parse_plan(df)
+    rows = _fit(plan_rows, rows)
     with engine.begin() as conn:
         sid = _snapshot(conn, "plan", origin, len(df))
-        known, unknown = _split_known(conn, rows)
+        known, waiting = _split_known(conn, rows)
         stats = _upsert(conn, known, TRACKED_PLAN, sid)
+        _replace_rows(conn, plan_rows, rows, known)
         new_msgs = _save_quality(conn, msgs, sid)
-    return {"source": "plan", "rows": len(df), "positions": len(known), "not_in_orders": unknown,
-            "quality_msgs": len(msgs), "quality_new": new_msgs, **stats}
+        deferred = _apply_deferred(conn, sid)
+    return {"source": "plan", "rows": len(df), "positions": len(known), "not_in_orders": len(waiting),
+            "deferred_applied": deferred, "quality_msgs": len(msgs), "quality_new": new_msgs, **stats}
 
 
 def _save_quality(conn, msgs: list[dict], snapshot_id: int) -> int:
@@ -532,26 +537,66 @@ def load_dispatcher(engine: Engine, df: pd.DataFrame, origin: str, end_dates: pd
     rows = _fit(dispatcher, parse_dispatcher(df))
     with engine.begin() as conn:
         sid = _snapshot(conn, "dispatcher", origin, len(df))
-        conn.execute(delete(dispatcher))
-        for i in range(0, len(rows), 5000):
-            conn.execute(insert(dispatcher), [{k: v for k, v in r.items() if k != "batch"} for r in rows[i:i + 5000]])
-        pos_rows = [{"order_no": r["order_no"], "pos": r["pos"], "disp_decade": r["decade"], "disp_counted": r["counted"],
-                     "disp_batch": r["batch"],
-                     "disp_ready": "готов" if r["segs_ready"] == r["segs"] else "не готов" if not r["segs_ready"]
-                     else f"готово {r['segs_ready']} из {r['segs']}"} for r in rows]
-        known, unknown = _split_known(conn, pos_rows)
-        stats = _upsert(conn, known, TRACKED_DISPATCHER, sid)
+        known, waiting = _split_known(conn, rows)
+        _replace_rows(conn, dispatcher, rows, known)
+        stats = _upsert(conn, [_disp_pos_row(r) for r in known], TRACKED_DISPATCHER, sid)
         if end_dates is not None:
-            ends, _ = _split_known(conn, parse_dispatcher_end_dates(end_dates))
-            _upsert(conn, ends, [], sid)
-    return {"source": "dispatcher", "rows": len(df), "positions": len(known), "not_in_orders": unknown, **stats}
+            ends = _fit(disp_end_dates, parse_dispatcher_end_dates(end_dates))
+            e_known, _ = _split_known(conn, ends)
+            _upsert(conn, e_known, [], sid)
+            _replace_rows(conn, disp_end_dates, ends, e_known)
+        deferred = _apply_deferred(conn, sid)
+    return {"source": "dispatcher", "rows": len(df), "positions": len(known), "not_in_orders": len(waiting),
+            "deferred_applied": deferred, **stats}
 
 
-def _split_known(conn, rows: list[dict]) -> tuple[list[dict], int]:
-    """План и диспетчерский дополняют позиции из отчёта по отрезкам и светофора, новых заказов не создают."""
+def _disp_pos_row(r: dict) -> dict:
+    """Строка диспетчерского (позиция) → поля позиции disp_*."""
+    segs, ready = r["segs"] or 0, r["segs_ready"] or 0
+    return {"order_no": r["order_no"], "pos": r["pos"], "disp_decade": r["decade"], "disp_counted": r["counted"],
+            "disp_batch": r["batch"],
+            "disp_ready": "готов" if ready == segs else "не готов" if not ready else f"готово {ready} из {segs}"}
+
+
+def _split_known(conn, rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(строки известных позиций, остальные). План и диспетчерский дополняют позиции из отчёта по отрезкам
+    и светофора, новых заказов не создают: строки остальных ждут в своей таблице (_apply_deferred)."""
     have = {(o, ps) for o, ps in conn.execute(select(positions.c.order_no, positions.c.pos))}
-    known = [r for r in rows if (r["order_no"], r["pos"]) in have]
-    return known, len(rows) - len(known)
+    known, waiting = [], []
+    for r in rows:
+        (known if (r["order_no"], r["pos"]) in have else waiting).append(r)
+    return known, waiting
+
+
+def _replace_rows(conn, table: Table, rows: list[dict], known: list[dict]) -> None:
+    """Таблица последних строк источника — целиком заново; applied = позиция уже была и строка к ней применена."""
+    keys = {(r["order_no"], r["pos"]) for r in known}
+    cols = {c.name for c in table.columns}
+    conn.execute(delete(table))
+    batch = [{**{k: v for k, v in r.items() if k in cols}, "applied": (r["order_no"], r["pos"]) in keys} for r in rows]
+    for i in range(0, len(batch), 5000):
+        conn.execute(insert(table), batch[i:i + 5000])
+
+
+def _apply_deferred(conn, snapshot_id: int) -> int:
+    """Порядок загрузки не важен: строки плана и диспетчерского, пришедшие раньше своей позиции (applied не true),
+    применяются, как только позиция появилась в отрезках или светофоре. Порядок — как при обычной загрузке из
+    папки: план, диспетчерский, затем плановое окончание из листа 1S0D. Переносом в журнале это не считается:
+    у новой позиции прежних значений нет. Возвращает число применённых строк."""
+    have = {(o, ps) for o, ps in conn.execute(select(positions.c.order_no, positions.c.pos))}
+    applied = 0
+    for table, tracked, to_pos in ((plan_rows, TRACKED_PLAN, None), (dispatcher, TRACKED_DISPATCHER, _disp_pos_row),
+                                   (disp_end_dates, [], None)):
+        ready = [dict(r._mapping) for r in conn.execute(select(table).where(table.c.applied.is_not(True)))
+                 if (r.order_no, r.pos) in have]
+        if not ready:
+            continue
+        rows = [to_pos(r) for r in ready] if to_pos else [{k: v for k, v in r.items() if k != "applied"} for r in ready]
+        _upsert(conn, rows, tracked, snapshot_id)
+        conn.execute(update(table).where(table.c.order_no == bindparam("k_order"), table.c.pos == bindparam("k_pos"))
+                     .values(applied=True), [{"k_order": r["order_no"], "k_pos": r["pos"]} for r in ready])
+        applied += len(ready)
+    return applied
 
 
 LOADERS = {"segments": load_segments, "svetofor": load_svetofor, "plan": load_plan, "dispatcher": load_dispatcher}

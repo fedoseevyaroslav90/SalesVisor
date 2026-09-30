@@ -252,3 +252,42 @@ def test_plan_dispatcher_and_day():
     # Позиция 10: партия назначена, а по отрезкам произведена половина — расхождение
     assert dec["mismatch"] == 1
     assert order_card(engine, "1200000011")["positions"][1]["disp_ready"] == "готов"
+
+
+def test_load_order_does_not_matter():
+    """План и диспетчерский раньше отрезков: строки ждут и применяются, когда позиции появились (30.09.2026)."""
+    from salesvisor.db import dispatcher, plan_rows
+    from salesvisor.ingest import load_dispatcher, load_plan
+    from sqlalchemy import select
+
+    engine = make_engine("sqlite:///:memory:")
+    plan = pd.DataFrame([
+        {"Заказ клиента": "1200000031", "Позиция заказа": "10", "Рабочее место": "OEL60-5", "Дата конца": "02.10.2026",
+         "Время конца": "15:23", "Номер ДСЕ": "A", "Сообщение": "300018800", "Описание сообщения по качеству": "Слипание"},
+    ])
+    disp = pd.DataFrame([
+        {"Плановые МЗ (Руб)": 100, "ВП": 10, "Готов? (назначена партия - готов, пусто - не готов)": "готов", "ПО": "считать",
+         "Признак декады": "27. ОКТЯБРЬ 1декада", "Заказ клиента": "1200000031", "Позиция заказа клиента": "10",
+         "Длина отдельного отрезка": 2, "Базовая ЕИ": "КМ", "Количество км волокна": 32, "Партия": "9100000031"},
+    ])
+    r = load_plan(engine, plan, "plan.xlsx")
+    assert r["positions"] == 0 and r["not_in_orders"] == 1 and r["quality_new"] == 1
+    r = load_dispatcher(engine, disp, "disp.xlsx")
+    assert r["positions"] == 0 and r["not_in_orders"] == 1
+
+    r = load_segments(engine, pd.DataFrame([seg_row("1200000031", "10", "1", "10 октября, 2026", produced="@08@")]), "d1")
+    assert r["deferred_applied"] == 2
+    p = order_card(engine, "1200000031")["positions"][0]
+    assert p["line"] == "OEL60-5" and p["plan_end_time"] == "15:23"
+    assert p["disp_decade"] == "27. ОКТЯБРЬ 1декада" and p["disp_ready"] == "готов" and p["disp_batch"] == "9100000031"
+    # появление строк у новой позиции переносом не считается, повторная загрузка ничего не применяет заново
+    assert order_card(engine, "1200000031")["changes"] == []
+    assert load_segments(engine, pd.DataFrame([seg_row("1200000031", "10", "1", "10 октября, 2026", produced="@08@")]),
+                         "d2")["deferred_applied"] == 0
+    with engine.connect() as conn:
+        assert all(r.applied for r in conn.execute(select(plan_rows.c.applied)))
+        assert all(r.applied for r in conn.execute(select(dispatcher.c.applied)))
+
+    # следующий прогон ППМ без этой позиции не стирает её линию (в ZPP только ближайший горизонт)
+    load_plan(engine, plan.assign(**{"Заказ клиента": "1200000099"}), "plan2.xlsx")
+    assert order_card(engine, "1200000031")["positions"][0]["line"] == "OEL60-5"

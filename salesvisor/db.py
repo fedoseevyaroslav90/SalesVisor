@@ -128,6 +128,37 @@ dispatcher = Table(
     Column("km_ready", Float), Column("pcs_ready", Float), Column("ov_km_ready", Float),
     Column("mz_ready", Float), Column("vp_ready", Float),
     Column("segs", Integer), Column("segs_ready", Integer),
+    Column("batch", String(40)),
+    # применена ли строка к позиции; не true — позиции ещё не было, строка ждёт отрезков или светофора
+    Column("applied", Boolean),
+)
+
+# Порядок загрузки не важен (30.09.2026): план и диспетчерский дополняют только известные позиции, поэтому их
+# последние строки хранятся целиком, а те, чьей позиции ещё нет (applied не true), применяются после загрузки,
+# в которой позиция появилась. План производства ZPP context — строки последнего прогона ППМ по позициям
+plan_rows = Table(
+    "plan_rows", metadata,
+    Column("order_no", String(20), primary_key=True),
+    Column("pos", String(10), primary_key=True),
+    Column("line", String(40)),
+    Column("plan_lines", String(200)),
+    Column("plan_end_date", Date),
+    Column("plan_end_time", String(5)),
+    Column("dse", String(40)),
+    Column("plan_msg", String(200)),
+    Column("plan_qty", Float),
+    Column("plan_fact_qty", Float),
+    Column("applied", Boolean),
+)
+
+# Плановое окончание из листа 1S0D диспетчерского — последней книги с этим листом
+disp_end_dates = Table(
+    "disp_end_dates", metadata,
+    Column("order_no", String(20), primary_key=True),
+    Column("pos", String(10), primary_key=True),
+    Column("plan_end_date", Date),
+    Column("plan_end_time", String(5)),
+    Column("applied", Boolean),
 )
 
 # Сообщения о качестве (выявленные несоответствия) из ZPP context. Копятся: прогон ППМ их не стирает
@@ -172,9 +203,25 @@ def make_engine(url: str) -> Engine:
         engine = create_engine(url, poolclass=StaticPool, connect_args={"check_same_thread": False})
     else:
         engine = create_engine(url, pool_pre_ping=True)
-    metadata.create_all(engine)
-    _add_missing_columns(engine)
+    if engine.dialect.name == "postgresql":
+        # Веб и синхронизация стартуют одновременно: схему обновляет один процесс, второй ждёт
+        # (иначе второй падает на «column/relation already exists» и поднимается только перезапуском)
+        with engine.connect() as lock:
+            lock.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _SCHEMA_LOCK_KEY})
+            lock.commit()
+            try:
+                metadata.create_all(engine)
+                _add_missing_columns(engine)
+            finally:
+                lock.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _SCHEMA_LOCK_KEY})
+                lock.commit()
+    else:
+        metadata.create_all(engine)
+        _add_missing_columns(engine)
     return engine
+
+
+_SCHEMA_LOCK_KEY = 5_417_320_931
 
 
 def _add_missing_columns(engine: Engine) -> None:
