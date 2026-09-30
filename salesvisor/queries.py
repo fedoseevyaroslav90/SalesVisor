@@ -9,6 +9,8 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.engine import Engine
 
+from . import pdo
+from .brands import GROUPS
 from .db import bitrix_links, change_log, comments, dispatcher, positions, quality_msgs, segments, snapshots
 
 COLOR_RANK = {"red": 0, "yellow": 1, "green": 2, None: 3}
@@ -25,6 +27,11 @@ FIELD_NAMES = {
     "quality": "Несоответствие по качеству",
     "reject_code": "Причина отклонения (Z)",
     "new_position": "Новая позиция",
+    "pdo_plan": "Решение ПДО",
+    "pdo_fact": "Итог декады ПДО",
+    "deficit": "Дефицит материала",
+    "deficit_eta": "Сдвиг поставки материала",
+    "deficit_closed": "Дефицит закрыт",
 }
 
 
@@ -76,7 +83,11 @@ def position_view(pos: dict, today: date) -> dict:
     # регламент причин отклонения: Z6 (прогноз) не должно оставаться, когда декада срока уже началась
     z6_late = ((pos.get("reject_code") or "").upper() == "Z6" and not pos.get("closed") and not rel and bool(due_d)
                and due_d.replace(day=1 if due_d.day <= 10 else 11 if due_d.day <= 20 else 21) <= today)
+    # Путь в производстве: последнее решение ПДО — отказ, реальный дефицит материала, перегруз передела
+    pdo_rejected = (pos.get("pdo_last_status") in ("не принят", "частично") and not pos.get("closed") and not rel)
+    overload = bool((pos.get("wc_load") or 0) > 100 and not pos.get("closed") and not rel)
     return {**{k: _iso(v) for k, v in pos.items()}, "due_date": _iso(due_d), "overdue": overdue, "stale": stale,
+            "pdo_rejected": pdo_rejected, "overload": overload,
             "released": rel, "release_date": _iso(fact_d) if rel else None,
             "stage": pos.get("stage") or "Нет в отчёте по отрезкам", "days_late": late, "z6_late": z6_late,
             "priority": round((pos.get("mp_rub") or 0) * late)}
@@ -163,6 +174,7 @@ class Filters:
     first_to: date | None = None    # — по
     shift_min: int | None = None  # смещение от первой даты, дней, не меньше
     reject: str = ""              # причина отклонения SAP: коды через запятую, «-» — пусто; «!» в начале — кроме них
+    group: str = ""               # группа продукции по марке (brands.GROUPS), несколько — через «|»
     flags: frozenset = frozenset()  # overdue, quality, nolink, comments, noline, plan (есть в плане производства),
                                     # goz (ГОЗ/ВПК по изделию), noinkab (без внутренних ООО «Инкаб»)
 
@@ -177,6 +189,7 @@ class Filters:
                    first_from=_date(kw.get("first_from")), first_to=_date(kw.get("first_to")),
                    shift_min=int(shift) if shift.lstrip("-").isdigit() else None,
                    reject=(kw.get("reject") or "").strip().upper(),
+                   group=(kw.get("group") or "").strip(),
                    flags=frozenset(f for f in (kw.get("flags") or "").split(",") if f))
 
     def match(self, p: dict) -> bool:
@@ -191,6 +204,8 @@ class Filters:
         if self.stage and stage_group(p.get("stage")) not in vals(self.stage, codes=True):
             return False
         if self.color and (p.get("color") or "none") not in self.color.split(","):
+            return False
+        if self.group and (p.get("product_group") or "не определена") not in vals(self.group):
             return False
         due, first = _date(p.get("due_date")), _date(p.get("first_decade_end"))
         if self.due_from and not (due and due >= self.due_from) or self.due_to and not (due and due <= self.due_to):
@@ -210,7 +225,10 @@ class Filters:
                     or ("goz" in f and not _GOZ.match(p.get("product") or ""))
                     or ("z6late" in f and not p.get("z6_late"))
                     or ("late30" in f and not p.get("days_late", 0) > 30)
-                    or ("noinkab" in f and _INKAB.match(p.get("customer") or "")))
+                    or ("noinkab" in f and _INKAB.match(p.get("customer") or ""))
+                    or ("pdo_rejected" in f and not p.get("pdo_rejected"))
+                    or ("deficit_real" in f and not (p.get("deficit_real") and not p.get("closed")))
+                    or ("overload" in f and not p.get("overload")))
 
 
 # Поля позиции для ленты «Позиции» и выгрузки — только то, что показывает и по чему отбирает интерфейс
@@ -219,7 +237,10 @@ POSITION_FIELDS = ("order_no", "pos", "customer", "sales_dept", "manager", "prod
                    "plan_ship_date", "invoice_plan_date", "line", "plan_end_date", "plan_end_time", "stage",
                    "segments_total", "segments_ready", "overdue", "stale", "disp_decade", "disp_ready", "length_plan",
                    "unit", "amount_rub", "quality", "comments", "bitrix_task", "bitrix_deal", "reject_code", "reject_text",
-                   "mp_rub", "mz_rub", "days_late", "priority", "released", "release_date")
+                   "mp_rub", "mz_rub", "days_late", "priority", "released", "release_date", "brand", "product_group",
+                   "pdo_first_date", "pdo_rejects", "pdo_last_decade", "pdo_last_status", "pdo_last_reason",
+                   "pdo_last_bottleneck", "pdo_last_wc", "pdo_last_move", "pdo_fact_status", "wc_group", "wc_load",
+                   "deficit_active", "deficit_real", "deficit_eta", "deficit_materials", "pdo_rejected", "overload")
 
 
 def _filtered_positions(engine: Engine, scope: str, manager: str, dept: str, f: Filters, today: date) -> list[dict]:
@@ -388,9 +409,11 @@ def order_card(engine: Engine, order_no: str, today: date | None = None) -> dict
         link = conn.execute(select(bitrix_links).where(bitrix_links.c.order_no == order_no)).first()
         quality = [_row(r) for r in conn.execute(select(quality_msgs).where(quality_msgs.c.order_no == order_no)
                                                    .order_by(desc(quality_msgs.c.plan_end_date)))]
+        path = pdo.card(conn, order_no)      # путь в производстве: решения ПДО, итоги декад, дефициты
     ps.sort(key=lambda p: _pos_sort(p["pos"]))
     for p in ps:
         p["segments"] = sorted(segs.get(p["pos"], []), key=lambda s: _pos_sort(s["seg_no"]))
+        p["path"] = path.get(p["pos"], {"plan": [], "fact": [], "deficits": []})
     for c in changes:
         c["field_name"] = FIELD_NAMES.get(c["field"], c["field"])
     sap_task = next((p["bitrix_task"] for p in ps if p.get("bitrix_task")), None)
@@ -442,7 +465,7 @@ def meta(engine: Engine) -> dict:
                                                    .group_by(positions.c.reject_code))}
     return {"managers": managers, "depts": depts, "customers": customers, "lines": lines,
             "rejects": [{"code": k, "text": v} for k, v in sorted(rejects.items())], "last_load": last, "today": date.today().isoformat(),
-            "quality_total": quality_total}
+            "quality_total": quality_total, "groups": GROUPS}
 
 
 def _produced(p: dict) -> bool:

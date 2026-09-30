@@ -13,6 +13,7 @@ from .bitrix import Bitrix, post_decade_changes
 from .config import Settings
 from .ingest import SOURCE_ORDER, load_file, load_lock, load_plan, load_dispatcher, load_segments, load_svetofor, read_table, sniff_source
 from .metabase import Metabase
+from . import pdo
 
 log = logging.getLogger("salesvisor.sync")
 
@@ -42,15 +43,18 @@ def import_folder(engine: Engine, folder: str) -> list[dict]:
         except Exception:  # битый или недокачанный файл
             source = None
         parsed.append((f, data, source))
-    # Сначала отрезки (менеджер, этапы), потом светофор; внутри — по времени изменения файла
-    parsed.sort(key=lambda x: (SOURCE_ORDER.get(x[2], 9), x[0].stat().st_mtime))
+    # Сначала отрезки (менеджер, этапы), потом светофор; внутри — по времени изменения файла.
+    # Файлы ПДО — по декаде / дате снимка и версии: история должна лечь в хронологии
+    parsed.sort(key=lambda x: (SOURCE_ORDER.get(x[2], 9),
+                               pdo.sort_key(x[2], x[0].name) if x[2] in pdo.KINDS else (),
+                               x[0].stat().st_mtime))
     results = []
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     for f, data, source in parsed:
         target = "failed"
         if source:
             try:
-                results.append(load_file(engine, source, data, f.name))
+                results.append(load_file(engine, source, data, f.name, published_at=datetime.fromtimestamp(f.stat().st_mtime)))
                 target = "done"
             except Exception as e:  # любой сбой — в failed/, иначе файл вставал бы первым каждый час
                 log.warning("import %s: %s: %s", f.name, type(e).__name__, str(e)[:300])
@@ -86,6 +90,14 @@ def run_sync(engine: Engine, settings: Settings, wait: bool = True) -> list[dict
             results = _from_metabase(engine, settings)
         else:
             results = import_folder(engine, settings.import_dir)
+    if settings.pdo_task_ids and settings.bitrix_webhook_url:
+        # отчёты ПДО и по материалам из вложений задачи «ВАЖНЫЕ НОВОСТИ У2» (решение РП 01.10.2026)
+        from .bitrix_pdo import collect
+        try:
+            results += collect(engine, settings)
+        except Exception as e:  # сбой Битрикса не должен ронять синхронизацию отрезков
+            log.warning("bitrix pdo: %s: %s", type(e).__name__, str(e)[:300])
+            results.append({"source": "bitrix_pdo", "error": str(e)[:300]})
     if settings.bitrix_post_comments and settings.bitrix_webhook_url:
         sent = post_decade_changes(engine, Bitrix(settings))
         results.append({"source": "bitrix", "comments_for_changes": sent})

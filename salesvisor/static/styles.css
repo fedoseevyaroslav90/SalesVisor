@@ -64,7 +64,7 @@ td.wrap, .mini td, #orders td:nth-child(3), #orders td:nth-child(4), #changes td
 #orders td:nth-child(3) { min-width: 180px; }
 #orders td:nth-child(4) { min-width: 140px; }
 .mini tr.pos td:nth-child(3) { min-width: 200px; }
-.mini .late-tag { white-space: nowrap; }
+.mini .late-tag, .mini td.d { white-space: nowrap; overflow-wrap: normal; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: #f7f9fd; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -111,6 +111,7 @@ a { color: var(--accent); }
 .close { position: absolute; top: 10px; right: 14px; border: 0; background: none; font-size: 26px; cursor: pointer; color: var(--muted); }
 .drawer h2 { margin: 0 0 4px; font-size: 20px; }
 .drawer h3 { font-size: 14px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); margin: 22px 0 8px; }
+.drawer h4 { font-size: 13px; color: var(--muted); margin: 16px 0 4px; font-weight: 600; }
 .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; margin-top: 14px; }
 .facts div span { display: block; color: var(--muted); font-size: 12px; }
 .reasons { margin: 12px 0 0; padding: 10px 12px 10px 28px; background: var(--risk-bg); border-radius: 6px; }
@@ -294,3 +295,8 @@ table.mini.sub td:nth-child(3) { min-width: 180px; }
 .found-bar .cols { position: relative; margin-left: auto; }
 .cols-pop { right: 0; left: auto; min-width: 240px; }
 .warn-box { margin: 10px 0 0; padding: 8px 12px; border-radius: 6px; background: var(--overdue-bg); color: var(--overdue); font-size: 13px; }
+
+/* путь в производстве и пульс ПДО (01.10.2026) */
+.path-tags { margin-top: 2px; display: flex; flex-wrap: wrap; gap: 4px; }
+.warn-cell { color: var(--warn); font-weight: 600; }
+#pulseSignals ul { margin: 6px 0 0 18px; padding: 0; }

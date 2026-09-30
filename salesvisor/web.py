@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.engine import Engine
 
-from . import export, queries
+from . import export, pdo, queries
 from .config import Settings, get_settings
 from .bitrix import Bitrix, live_info
 from .db import bitrix_links, comments, make_engine, user_prefs
@@ -30,7 +30,7 @@ STATIC = Path(__file__).parent / "static"
 # Предел загружаемой выгрузки: CSV отчёта по отрезкам — около 70 МБ, xlsx того же отчёта — около 30 МБ
 MAX_UPLOAD_MB = 150
 # Поля отбора в строке запроса /api/orders, /api/positions, /api/export.xlsx (см. queries.Filters)
-FILTER_KEYS = ("q", "order", "customer", "line", "stage", "due_from", "due_to", "first_from", "first_to", "shift_min", "reject",
+FILTER_KEYS = ("q", "order", "customer", "line", "stage", "due_from", "due_to", "first_from", "first_to", "shift_min", "reject", "group",
                "flags")
 
 
@@ -255,6 +255,11 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
     @app.get("/api/dispatcher")
     def api_dispatcher(decade: str = "", manager: str = "", dept: str = ""):
         return queries.dispatcher_summary(engine, decade=decade, manager=manager, dept=dept)
+
+    @app.get("/api/pdo/pulse")
+    def api_pdo_pulse(decades: int = 12):
+        """Пульс ПДО: своевременность и полнота решений по декадам, сигналы, загрузка переделов вперёд."""
+        return pdo.pulse(engine, decades=max(4, min(decades, 40)))
 
     @app.get("/api/changes")
     def api_changes(days: int = 7, manager: str = ""):

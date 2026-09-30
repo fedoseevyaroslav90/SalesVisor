@@ -84,6 +84,27 @@ positions = Table(
     Column("disp_counted", Boolean),      # ПО = «считать»: позиция входит в план декады
     Column("disp_ready", String(40)),     # готов / не готов / готово 3 из 5 (назначена партия)
     Column("disp_batch", String(40)),
+    # Марка и группа продукции по наименованию (brands.py, каталоги Инкаба, Окей-Кабеля, спецкабеля и ТУ)
+    Column("brand", String(12)),
+    Column("product_group", String(30)),
+    # Путь в производстве (01.10.2026): сводка по снимкам ПДО, дефицитам и загрузке переделов — пересчитывается
+    # после каждой их загрузки (pdo.refresh_positions)
+    Column("pdo_first_date", Date),       # якорь: требуемая дата при первом появлении в плане ПДО (конец декады)
+    Column("pdo_rejects", Integer),       # декад, в которых позиция не принята
+    Column("pdo_last_decade", Date),      # последняя декада в плане ПДО
+    Column("pdo_last_status", String(40)),
+    Column("pdo_last_reason", String(200)),
+    Column("pdo_last_bottleneck", String(200)),
+    Column("pdo_last_wc", String(40)),    # рабочее место
+    Column("pdo_last_move", Date),        # «дата, на которую перенести»
+    Column("pdo_fact_status", String(40)),  # итог последней декады: готов / не готов
+    Column("pdo_fact_reason", String(200)),
+    Column("wc_group", String(40)),       # передел рабочего места
+    Column("wc_load", Float),             # загрузка рабочего места в декаде плана, % (последний снимок «Загрузки РЦ»)
+    Column("deficit_active", Integer),    # материалов «не обеспечено» в последнем отчёте по материалам
+    Column("deficit_real", Boolean),      # среди них есть «ждём поставку»
+    Column("deficit_eta", Date),          # самая поздняя ожидаемая поставка
+    Column("deficit_materials", String(300)),
     Column("first_seen_at", DateTime, server_default=func.now()),
     Column("updated_at", DateTime, server_default=func.now()),
 )
@@ -210,6 +231,138 @@ user_prefs = Table(
     Column("person", String(200)),
     Column("data", Text, nullable=False),
     Column("updated_at", DateTime, nullable=False, server_default=func.now()),
+)
+
+
+# ---------------------------------------------------------------- путь в производстве (01.10.2026)
+# Файлы ПДО и сопутствующие отчёты: «Отчёт по принятым заказам в декаду … ver.N» (pdo_plan), «… и факт в декаду»
+# (pdo_fact), «Отчёт по материалам (Z0+Z4)» (materials), «Загрузка РЦ \ Сводный версия NNN» (load).
+# Приходят вложениями задачи Битрикса «ВАЖНЫЕ НОВОСТИ У2» (bitrix_pdo.py) или через папку SFTP.
+pdo_files = Table(
+    "pdo_files", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("kind", String(12), nullable=False),
+    Column("origin", String(300)),
+    Column("attachment_id", String(30)),
+    Column("published_at", DateTime),     # когда выложен (дата комментария в задаче; для папки — время загрузки)
+    Column("decade_end", Date),           # декада отчёта ПДО (конец декады)
+    Column("version", Integer),           # ver.N / N-ый пул
+    Column("report_date", Date),          # дата отчёта по материалам или снимка загрузки
+    Column("rows", Integer),
+    Column("rejects", Integer),           # отказов «не принят» / «не готов»
+    Column("no_reason", Integer),         # из них без причины
+    Column("no_bottleneck", Integer),     # без узкого места (только план)
+    Column("no_move", Integer),           # без даты переноса (только план)
+    Column("loaded_at", DateTime, nullable=False, server_default=func.now()),
+)
+
+pdo_rows = Table(
+    "pdo_rows", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("file_id", Integer, index=True),
+    Column("kind", String(12)),
+    Column("decade_end", Date, index=True),
+    Column("version", Integer),
+    Column("order_no", String(20), index=True),
+    Column("pos", String(10)),
+    Column("seg_no", String(10)),
+    Column("req_date", Date),
+    Column("status", String(40)),
+    Column("accepted", Boolean),
+    Column("reason", String(200)),
+    Column("bottleneck", String(200)),
+    Column("wc", String(40)),
+    Column("move_to", Date),
+    Column("end_date", Date),
+    Column("qty", Float),
+    Column("unit", String(10)),
+    Column("mz", Float),
+    Column("vp", Float),
+    Column("fact_date", Date),
+    Column("fact_qty", Float),
+    Column("classifier", String(200)),
+    Column("responsible", String(100)),
+    Column("product", String(300)),
+)
+
+# Текущее решение ПДО по отрезку в декаде: последняя версия плана (kind=pdo_plan) и итог декады (pdo_fact)
+pdo_decision = Table(
+    "pdo_decision", metadata,
+    Column("kind", String(12), primary_key=True),
+    Column("decade_end", Date, primary_key=True),
+    Column("order_no", String(20), primary_key=True),
+    Column("pos", String(10), primary_key=True),
+    Column("seg_no", String(10), primary_key=True),
+    Column("file_id", Integer),
+    Column("version", Integer),
+    Column("published_at", DateTime),
+    Column("req_date", Date),
+    Column("status", String(40)),
+    Column("accepted", Boolean),
+    Column("reason", String(200)),
+    Column("bottleneck", String(200)),
+    Column("wc", String(40)),
+    Column("move_to", Date),
+    Column("vp", Float),
+    Column("classifier", String(200)),
+    Column("responsible", String(100)),
+)
+
+# Дефицит материала по позиции заказа: текущее состояние по последнему «Отчёту по материалам» и история дат поставки
+deficits = Table(
+    "deficits", metadata,
+    Column("order_no", String(20), primary_key=True),
+    Column("pos", String(10), primary_key=True),
+    Column("material", String(20), primary_key=True),
+    Column("material_name", String(100)),
+    Column("material_group", String(60)),
+    Column("need", Float),
+    Column("state", String(30)),
+    Column("active", Boolean),            # «не обеспечено» в последнем отчёте
+    Column("real", Boolean),              # комментарий снабжения «ждём поставку» (не ОХ / склад)
+    Column("eta", Date),                  # ожидаемая поставка по последнему отчёту
+    Column("eta_first", Date),
+    Column("eta_changes", Integer),
+    Column("comment", String(100)),
+    Column("req_date", Date),
+    Column("first_seen", Date),
+    Column("last_seen", Date),
+    Column("closed_at", Date),
+)
+
+# Загрузка рабочих мест и переделов по декадам на дату снимка («Загрузка РЦ \ Сводный версия NNN»)
+wc_load = Table(
+    "wc_load", metadata,
+    Column("ver", String(5), primary_key=True),       # 010 — Z0+Z4, 000, 013, 100 — с прогнозами
+    Column("snap_date", Date, primary_key=True),
+    Column("decade_end", Date, primary_key=True),
+    Column("level", String(10), primary_key=True),    # группа | место
+    Column("name", String(60), primary_key=True),
+    Column("grp", String(60)),
+    Column("km", Float),
+    Column("load", Float),
+    Column("cap", Float),
+)
+
+# Рабочее место → передел (по заголовкам листов «Загрузки РЦ»)
+wc_map = Table(
+    "wc_map", metadata,
+    Column("name", String(40), primary_key=True),
+    Column("grp", String(60)),
+    Column("updated_at", DateTime, server_default=func.now()),
+)
+
+# Вложения задач Битрикса, уже просмотренные сборщиком (чтобы не качать повторно)
+bitrix_files = Table(
+    "bitrix_files", metadata,
+    Column("attachment_id", String(30), primary_key=True),
+    Column("task_id", String(20)),
+    Column("name", String(300)),
+    Column("posted_at", DateTime),
+    Column("kind", String(12)),
+    Column("status", String(20)),         # loaded | skipped | failed
+    Column("note", String(200)),
+    Column("seen_at", DateTime, nullable=False, server_default=func.now()),
 )
 
 

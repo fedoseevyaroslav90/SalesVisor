@@ -88,6 +88,7 @@
     document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x === b));
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
     if (b.dataset.tab === 'changes') loadChanges();
+    if (b.dataset.tab === 'pulse') loadPulse().catch(err => { $('#pulseEmpty').hidden = false; $('#pulseEmpty').textContent = 'Не удалось загрузить: ' + err.message; });
     if (b.dataset.tab === 'stats') loadStats().catch(err => { $('#statsEmpty').hidden = false; $('#statsEmpty').textContent = 'Не удалось посчитать: ' + err.message; });
     if (b.dataset.tab === 'day') loadDay().catch(showDayErr);
     if (b.dataset.tab === 'disp') loadDisp().catch(err => { $('#dispEmpty').hidden = false; $('#dispEmpty').textContent = 'Не удалось загрузить: ' + err.message; });
@@ -105,6 +106,7 @@
     MS.dept.setOptions(opts(state.meta.depts));
     fill($('#dayLine'), state.meta.lines || [], '');
     MS.fLine.setOptions([{ value: '-', label: 'Не в плане производства' }, ...opts(state.meta.lines || [])]);
+    MS.fGroup.setOptions(opts(state.meta.groups || []));
     MS.fReject.setOptions([...(state.meta.rejects || []).map(r => ({ value: r.code, label: `${r.code} — ${r.text || ''}` })),
       { value: '-', label: '(пусто) — принят в производство' }]);
     $('#customerList').innerHTML = (state.meta.customers || []).map(v => `<option value="${esc(v)}">`).join('');
@@ -190,6 +192,7 @@
     }
     if (v('#fShift')) p.shift_min = v('#fShift');
     if (v('#fReject')) p.reject = v('#fReject');
+    if (v('#fGroup')) p.group = v('#fGroup');
     const flags = flagInputs().filter(i => i.checked).map(i => i.dataset.flag);
     if (flags.length) p.flags = flags.join(',');
     return p;
@@ -199,7 +202,7 @@
     const text = sel => { const el = $(sel); return el.tagName === 'SELECT' ? el.options[el.selectedIndex]?.text : el.value.split('|').join(', '); };
     const parts = [state.view === 'orders' ? 'Заказы' : 'Позиции', text('#scope')];
     for (const [sel, name] of [['#manager', 'менеджер'], ['#dept', 'отдел'], ['#search', 'поиск'], ['#fCustomer', 'клиент'],
-      ['#fLine', 'линия'], ['#fStage', 'этап'], ['#fShift', 'смещение от, дн.'], ['#fReject', 'причина откл.']]) if ($(sel).value) parts.push(`${name}: ${text(sel)}`);
+      ['#fLine', 'линия'], ['#fStage', 'этап'], ['#fShift', 'смещение от, дн.'], ['#fReject', 'причина откл.'], ['#fGroup', 'группа']]) if ($(sel).value) parts.push(`${name}: ${text(sel)}`);
     const p = filterParams();
     if (p.due_from || p.due_to) parts.push(`срок: ${p.due_from ? fmt(p.due_from) : '…'}–${p.due_to ? fmt(p.due_to) : '…'}`);
     if (p.first_from || p.first_to) parts.push(`первая дата: ${p.first_from ? fmt(p.first_from) : '…'}–${p.first_to ? fmt(p.first_to) : '…'}`);
@@ -214,7 +217,7 @@
   // отличающийся только фрагментом, браузер страницей не перезагружает — открывший ссылку без сеанса завис бы.
   const URL_FIELDS = { scope: '#scope', manager: '#manager', dept: '#dept', q: '#search', customer: '#fCustomer', line: '#fLine',
     stage: '#fStage', due: '#fDue', due_from: '#fDueFrom', due_to: '#fDueTo', first: '#fFirst', first_from: '#fFirstFrom',
-    first_to: '#fFirstTo', shift: '#fShift', reject: '#fReject' };
+    first_to: '#fFirstTo', shift: '#fShift', reject: '#fReject', group: '#fGroup' };
   function saveUrl() {
     const h = new URLSearchParams();
     if (state.view !== 'orders') h.set('view', state.view);
@@ -465,7 +468,7 @@
         <td>${fmt(p.plan_ship_date || p.invoice_plan_date)}</td>
         <td>${p.line ? `<b>${esc(p.line)}</b><div class="sub">${fmt(p.plan_end_date)} ${esc(p.plan_end_time || '')}</div>` : '<span class="muted">—</span>'}</td>
         <td>${esc(p.stage)}${p.reject_code ? ` <span class="sub" title="${esc(p.reject_text || 'причина отклонения')}">${esc(p.reject_code)}</span>` : ''}
-          <div class="sub">${p.segments_total ? `отрезков ${p.segments_ready}/${p.segments_total}` : ''}${p.disp_decade ? ` · ${esc(p.disp_decade)}` : ''}</div></td>
+          <div class="sub">${p.segments_total ? `отрезков ${p.segments_ready}/${p.segments_total}` : ''}${p.disp_decade ? ` · ${esc(p.disp_decade)}` : ''}</div>${pathTags(p)}</td>
         <td class="num">${kRub(p.mp_rub)}${p.days_late ? `<div class="sub ${p.days_late > 30 ? 'neg' : ''}">опозд. ${p.days_late} дн.</div>` : ''}</td>
         <td>${p.quality ? `<div class="q-tag">несоотв.: ${p.quality}</div>` : ''}${p.comments ? `<span class="sub" title="Комментарии к заказу">💬${p.comments}</span> ` : ''}${bxLink('task', p.bitrix_task)}</td>
       </tr>`).join('');
@@ -664,6 +667,77 @@
     return /^https:\/\//i.test(tpl || '') ? `<a href="${esc(tpl.replace('{id}', id))}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(label)}</a>` : esc(label);
   }
 
+  // ---------- путь в производстве: отметки и карточка ----------
+  function pathTags(p) {
+    const t = [];
+    if (p.pdo_rejected) t.push(`<span class="late-tag" title="${esc([p.pdo_last_reason, p.pdo_last_bottleneck].filter(Boolean).join(' · ') || 'причина не указана')}">не принят ПДО ${p.pdo_last_decade ? fmt(p.pdo_last_decade) : ''}</span>`);
+    if (p.deficit_real && !p.closed) t.push(`<span class="q-tag" title="${esc(p.deficit_materials || '')}">ждём материал${p.deficit_eta ? ' до ' + fmt(p.deficit_eta) : ''}</span>`);
+    if (p.overload) t.push(`<span class="late-tag" title="${esc(p.wc_group || '')}">${esc(p.pdo_last_wc || 'передел')} ${Math.round(p.wc_load)} %</span>`);
+    return t.length ? `<div class="path-tags">${t.join(' ')}</div>` : '';
+  }
+  const loadCls = v => (v == null ? '' : v > 100 ? 'neg' : v >= 90 ? 'warn-cell' : '');
+  function pathSection(ps) {
+    const withPath = ps.filter(p => p.path && (p.path.plan.length || p.path.fact.length || p.path.deficits.length));
+    if (!withPath.length) return '<h3>Путь в производстве</h3><p class="muted">По позициям заказа нет решений ПДО и дефицитов в загруженных отчётах.</p>';
+    const plan = withPath.map(p => {
+      const facts = Object.fromEntries(p.path.fact.map(f => [f.decade, f]));
+      return p.path.plan.map(d => {
+        const f = facts[d.decade];
+        const why = [d.reason, d.bottleneck].filter(Boolean).join(' · ') || (d.status === 'принят' ? '' : 'причина не указана');
+        const fact = f ? `<span class="${f.status === 'принят' ? 'n-ok' : 'late-tag'}">${f.status === 'принят' ? 'готов' : 'не готов'}</span>`
+          + (f.status !== 'принят' && (f.classifier || f.reason) ? `<div class="sub">${esc(f.classifier || f.reason)}</div>` : '') : '';
+        return `<tr><td>${esc(p.pos)}</td><td class="d">${fmt(d.decade)}</td>
+          <td class="${d.status === 'принят' ? 'n-ok' : 'late-tag'}">${esc(d.status)}${d.status === 'частично' ? ` (${d.rejected} из ${d.segments})` : ''}</td>
+          <td>${esc(why)}</td>
+          <td>${d.wc ? esc(d.wc) + (d.wc_group ? `<div class="sub">${esc(d.wc_group)}</div>` : '') : '—'}</td>
+          <td class="num ${loadCls(d.wc_load)}">${d.wc_load == null ? '—' : Math.round(d.wc_load) + ' %'}</td>
+          <td class="d">${d.move_to ? fmt(d.move_to) : ''}</td>
+          <td>${fact}</td>
+          <td class="sub">${d.published_at ? fmt(d.published_at.slice(0, 10)) : ''}${d.version ? ' · v' + d.version : ''}</td></tr>`;
+      }).join('');
+    }).join('');
+    const defs = withPath.map(p => p.path.deficits.map(x => `<tr class="${x.active ? '' : 'muted'}"><td>${esc(p.pos)}</td>
+          <td>${esc(x.material_name || x.material)}<div class="sub">${esc(x.material_group || '')}</div></td>
+          <td>${x.active ? (x.real ? '<span class="q-tag">ждём поставку</span>' : 'не обеспечено') : 'обеспечено ' + fmt(x.closed_at)}${x.comment ? `<div class="sub">${esc(x.comment)}</div>` : ''}</td>
+          <td>${x.eta ? fmt(x.eta) : 'даты нет'}${x.eta_changes ? `<div class="sub">менялась ${x.eta_changes} раз, первая — ${fmt(x.eta_first)}</div>` : ''}</td>
+          <td class="d">${x.req_date ? fmt(x.req_date) : '—'}</td>
+          <td class="d">${fmt(x.first_seen)}</td></tr>`).join('')).join('');
+    return `<h3>Путь в производстве</h3>
+      <p class="sub">Решения ПДО по декадам (последняя версия отчёта «принято / не принято»), итог декады и загрузка рабочего места.</p>
+      ${plan ? `<div class="table-wrap"><table class="mini">
+        <thead><tr><th>Поз.</th><th>Декада</th><th>Решение ПДО</th><th>Причина · узкое место</th><th>Рабочее место</th><th>Загрузка</th><th>Перенос на</th><th>Итог декады</th><th>Отчёт</th></tr></thead>
+        <tbody>${plan}</tbody></table></div>` : '<p class="muted">Решений ПДО по позициям нет.</p>'}
+      ${defs ? `<h4>Материалы</h4><p class="sub">Дефициты по отчётам снабжения (Z0+Z4): что ждём, когда обещана поставка и сколько раз дата сдвигалась.</p>
+        <div class="table-wrap"><table class="mini">
+        <thead><tr><th>Поз.</th><th>Материал</th><th>Состояние</th><th>Поставка</th><th>Нужен к</th><th>В дефиците с</th></tr></thead>
+        <tbody>${defs}</tbody></table></div>` : ''}`;
+  }
+
+  // ---------- пульс ПДО ----------
+  async function loadPulse() {
+    const d = await api('api/pdo/pulse');
+    $('#pulseEmpty').hidden = true;
+    $('#pulseSignals').innerHTML = d.signals.length
+      ? `<div class="warn-box"><b>Сигналы</b><ul>${d.signals.map(s => `<li class="${s.level === 'warn' ? '' : 'sub'}">${esc(s.text)}</li>`).join('')}</ul></div>`
+      : '<p class="muted">Сигналов нет.</p>';
+    const pc = v => (v == null ? '—' : v + ' %');
+    const lead = r => (r.lead_days >= 0 ? 'за ' + r.lead_days + ' дн. до начала' : 'через ' + (-r.lead_days) + ' дн. после начала');
+    $('#pulseDecades tbody').innerHTML = d.decades.map(r => `<tr>
+      <td>${fmt(r.decade)}</td>
+      <td>${r.plan_published ? fmt(r.plan_published) + `<div class="sub ${r.lead_days < 0 ? 'neg' : ''}">${lead(r)}</div>` : '<span class="late-tag">нет</span>'}</td>
+      <td class="num">${r.versions || '—'}</td>
+      <td>${r.fact_published ? fmt(r.fact_published) + `<div class="sub">через ${r.fact_lag_days} дн.</div>` : '—'}</td>
+      <td class="num">${r.rows ?? '—'}</td><td class="num">${r.rejects ?? '—'}</td>
+      <td class="num ${r.no_reason_pct > 20 ? 'neg' : ''}">${pc(r.no_reason_pct)}</td>
+      <td class="num ${r.no_bottleneck_pct > 20 ? 'neg' : ''}">${pc(r.no_bottleneck_pct)}</td>
+      <td class="num">${pc(r.no_move_pct)}</td>
+      <td class="num">${r.load_unconfirmed || ''}</td></tr>`).join('');
+    const L = d.load;
+    $('#pulseLoadTitle').textContent = L.snapshot ? `Загрузка переделов, % (снимок «Загрузки РЦ» от ${fmt(L.snapshot)}, твёрдый план Z0+Z4)` : 'Загрузка переделов — снимков «Загрузки РЦ» пока нет';
+    $('#pulseLoad thead').innerHTML = L.snapshot ? `<tr><th>Передел</th>${L.decades.map(x => `<th>${fmt(x)}</th>`).join('')}</tr>` : '';
+    $('#pulseLoad tbody').innerHTML = L.rows.map(r => `<tr><td>${esc(r.group)}</td>${L.decades.map(x => `<td class="num ${loadCls(r[x])}">${r[x] == null ? '' : r[x]}</td>`).join('')}</tr>`).join('');
+  }
+
   // ---------- карточка заказа ----------
   const FLAGS = [['produced', 'П', 'Произведён'], ['stock', 'С', 'На складе'], ['ready', 'Г', 'Готов к отгрузке'], ['in_transit', 'В', 'В пути'], ['shipped', 'О', 'Отгружен'], ['invoiced', 'Ф', 'Отфактурирован']];
 
@@ -724,6 +798,8 @@
         <thead><tr><th></th><th>Поз.</th><th>Изделие</th><th>Первая декада</th><th>Текущая декада</th><th>Смещ., дн.</th><th>Треб. дата</th><th>План отгрузки</th><th title="План производства: линия и плановое окончание">Линия</th><th>Этап</th><th>Отрезки</th></tr></thead>
         <tbody>${posRows}</tbody>
       </table></div>
+
+      ${pathSection(d.positions)}
 
       <h3>История изменений</h3>
       ${d.changes.length ? `<table class="mini"><thead><tr><th>Когда</th><th>Поз.</th><th>Что</th><th>Было</th><th>Стало</th></tr></thead><tbody>

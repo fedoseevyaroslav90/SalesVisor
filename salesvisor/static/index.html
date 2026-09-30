@@ -16,6 +16,7 @@
       <button data-tab="disp">Диспетчерский</button>
       <button data-tab="changes">Изменения</button>
       <button data-tab="stats">Статистика</button>
+      <button data-tab="pulse" title="Своевременность и полнота решений ПДО, загрузка переделов вперёд">Пульс ПДО</button>
       <button data-tab="load">Загрузка</button>
     </nav>
     <span class="meta-line" id="lastLoad"></span>
@@ -76,6 +77,7 @@
         <span class="period" id="fFirstPeriod" hidden><input type="date" id="fFirstFrom" aria-label="Первая дата с"> — <input type="date" id="fFirstTo" aria-label="Первая дата по"></span>
         <label>Смещение от <input id="fShift" type="number" min="0" step="10" placeholder="0"> дн.</label>
         <span class="field" title="Причина отклонения SAP по регламенту: Z4 — готов к производству, Z6 — прогноз, Z7 — бизнес-план, пусто — принят в производство">Причина откл. <input type="hidden" id="fReject" data-multi="Любая"></span>
+        <span class="field" title="Группа продукции по марке кабеля (каталоги Инкаба, Окей-Кабеля, спецкабеля и ТУ); грунт — отдельно со стальной и стеклопластиковой бронёй">Группа <input type="hidden" id="fGroup" data-multi="Любая"></span>
         <span class="flags-group">
           <label class="check"><input type="checkbox" data-flag="overdue"> просрочено</label>
           <label class="check"><input type="checkbox" data-flag="quality"> несоответствия</label>
@@ -86,6 +88,9 @@
           <label class="check" title="Скрыть заказы, где клиент — ООО «Инкаб» (Дальний Восток и другие юрлица остаются)"><input type="checkbox" data-flag="noinkab"> без внутренних ООО «Инкаб»</label>
           <label class="check" title="Регламент причин отклонения: Z6 (прогноз, ожидание аванса) не должно оставаться к крайней дате приёма в декаду. Здесь — позиции Z6, у которых декада срока уже началась"><input type="checkbox" data-flag="z6late"> Z6 в начавшейся декаде</label>
           <label class="check" title="Опоздание к первой дате клиента больше 30 дней: по СТП 02-2-01 покупатель вправе отказаться от поставки"><input type="checkbox" data-flag="late30"> опоздание больше 30 дн.</label>
+          <label class="check" title="Последнее решение ПДО по позиции — «не принят» в декаду (или принят частично): причина и узкое место — в карточке заказа"><input type="checkbox" data-flag="pdo_rejected"> не принят ПДО</label>
+          <label class="check" title="В последнем отчёте по материалам позиция «не обеспечена» и снабжение пишет «ждём поставку» (не материал на ответственном хранении)"><input type="checkbox" data-flag="deficit_real"> ждём материал</label>
+          <label class="check" title="Рабочее место позиции в декаде плана ПДО загружено больше 100 % по последнему снимку «Загрузки РЦ»"><input type="checkbox" data-flag="overload"> перегруз передела</label>
         </span>
         <button class="linkish-btn" id="fReset">Сбросить отбор</button>
       </div>
@@ -242,6 +247,23 @@
         <div><h3 class="st-h">Линии (открытые позиции в плане производства)</h3><div class="table-wrap"><table id="statsLines"></table></div></div>
       </div>
       <p class="empty" id="statsEmpty" hidden></p>
+    </section>
+
+    <section id="tab-pulse" class="tab">
+      <p class="lead">Поток решений планово-диспетчерского отдела: когда выходит отчёт «принято / не принято» к декаде, сколько версий,
+        когда приходит итог «и факт», у скольких отказов не указаны причина, узкое место и дата переноса. Источник — вложения задачи
+        «ВАЖНЫЕ НОВОСТИ У2» и выгрузки в папку. Сигналы — по фактам в данных.</p>
+      <div id="pulseSignals"></div>
+      <h3 class="st-h">По декадам</h3>
+      <div class="table-wrap"><table id="pulseDecades" class="disp"><thead><tr>
+        <th>Декада</th><th title="Дата первого предварительного отчёта и сколько дней до начала декады (или после начала)">Первый отчёт</th>
+        <th>Версий</th><th title="Итог «и факт»: через сколько дней после конца декады">Итог декады</th><th>Отрезков в плане</th><th>Отказов</th>
+        <th>Без причины</th><th>Без узкого места</th><th>Без даты переноса</th>
+        <th title="Отказы «полная загрузка», когда названное рабочее место загружено меньше 90 %">«Загрузка» не подтверждена</th>
+      </tr></thead><tbody></tbody></table></div>
+      <h3 class="st-h" id="pulseLoadTitle">Загрузка переделов</h3>
+      <div class="table-wrap"><table id="pulseLoad" class="disp"><thead></thead><tbody></tbody></table></div>
+      <p class="muted" id="pulseEmpty" hidden></p>
     </section>
 
     <section id="tab-load" class="tab">

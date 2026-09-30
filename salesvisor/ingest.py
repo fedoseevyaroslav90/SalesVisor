@@ -14,6 +14,7 @@ from sqlalchemy import Table, bindparam, delete, func, insert, select, text, upd
 from sqlalchemy.engine import Engine
 
 from . import parsing as p
+from . import pdo
 from .db import change_log, disp_end_dates, dispatcher, plan_rows, positions, quality_msgs, segments, snapshots
 
 SVETOFOR_REQUIRED = ["Заказ", "Позиция", "Первая декада", "Текущая декада"]
@@ -515,6 +516,7 @@ def load_svetofor(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
         stats = _upsert(conn, rows, TRACKED_SVETOFOR, sid)
         _fill_order_managers(conn)
         deferred = _apply_deferred(conn, sid)
+        pdo.refresh_brands(conn)
     return {"source": "svetofor", "rows": len(df), "positions": len(rows), "deferred_applied": deferred, **stats}
 
 
@@ -530,6 +532,7 @@ def load_segments(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
         stats = _upsert(conn, pos_rows, TRACKED_SEGMENTS, sid, log_new=had_segments)
         _fill_order_managers(conn)
         deferred = _apply_deferred(conn, sid)
+        pdo.refresh_brands(conn)
     return {"source": "segments", "rows": len(df), "positions": len(pos_rows), "deferred_applied": deferred, **stats}
 
 
@@ -638,8 +641,9 @@ def _apply_deferred(conn, snapshot_id: int) -> int:
 
 
 LOADERS = {"segments": load_segments, "svetofor": load_svetofor, "plan": load_plan, "dispatcher": load_dispatcher}
-# Порядок загрузки из папки: сначала отрезки (менеджер, этапы), затем остальное
-SOURCE_ORDER = {"segments": 0, "svetofor": 1, "plan": 2, "dispatcher": 3}
+# Порядок загрузки из папки: сначала отрезки (менеджер, этапы), затем остальное; файлы ПДО и сопутствующие —
+# после позиций (снимки ПДО, загрузка переделов, отчёты по материалам)
+SOURCE_ORDER = {"segments": 0, "svetofor": 1, "plan": 2, "dispatcher": 3, "pdo_plan": 4, "pdo_fact": 4, "load": 5, "materials": 6}
 
 
 def _fill_order_managers(conn) -> None:
@@ -660,7 +664,12 @@ def _fill_order_managers(conn) -> None:
 
 
 def sniff_source(data: bytes, filename: str) -> str | None:
-    """Тип выгрузки по заголовкам — без разбора всей таблицы (CSV отчёта по отрезкам — десятки мегабайт)."""
+    """Тип выгрузки по заголовкам — без разбора всей таблицы (CSV отчёта по отрезкам — десятки мегабайт).
+    Отчёты ПДО проверяются первыми: у «Отчёта по принятым заказам» те же колонки, что у плана ZPP
+    («Заказ клиента», «Рабочее место», «Дата конца», «Номер ДСЕ»), и без этого он загрузился бы как план."""
+    kind = pdo.sniff(data, filename)
+    if kind:
+        return kind
     if filename.lower().endswith((".xlsx", ".xlsm")):
         for _title, headers in _sheet_headers(data):
             src = detect_source([str(h).strip() for h in headers])
@@ -672,7 +681,10 @@ def sniff_source(data: bytes, filename: str) -> str | None:
     return detect_source([str(c).strip() for c in df.columns])
 
 
-def load_file(engine: Engine, source: str, data: bytes, filename: str) -> dict:
+def load_file(engine: Engine, source: str, data: bytes, filename: str, published_at: datetime | None = None) -> dict:
+    """published_at — когда файл выложен (для отчётов ПДО: из папки — время файла, из Битрикса — дата комментария)."""
+    if source in pdo.LOADERS:
+        return pdo.LOADERS[source](engine, data, filename, published_at=published_at)
     if source not in LOADERS:
         raise ValueError("Неизвестный источник")
     df = read_table(data, filename)

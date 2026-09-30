@@ -1,6 +1,6 @@
 """Командная строка:
     python -m salesvisor serve [--port 8000]
-    python -m salesvisor load ФАЙЛ [ФАЙЛ ...]       загрузить выгрузки вручную
+    python -m salesvisor load ФАЙЛ [ФАЙЛ ...]       загрузить выгрузки вручную (SAP, отчёты ПДО)
     python -m salesvisor sync [--every СЕКУНД]      забрать выгрузки из Metabase или папки IMPORT_DIR (разово или по кругу)
 """
 from __future__ import annotations
@@ -8,8 +8,10 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 
+from . import pdo
 from .config import get_settings
 from .db import make_engine
 from .ingest import load_file, load_lock, sniff_source
@@ -38,13 +40,19 @@ def main() -> None:
         uvicorn.run(create_app(settings=settings), host=args.host, port=args.port)
     elif args.cmd == "load":
         engine = make_engine(settings.database_url)
+        todo = []
         for f in args.files:
             data = Path(f).read_bytes()
             source = sniff_source(data, f)
             if not source:
-                raise SystemExit(f"{f}: не похоже ни на одну из выгрузок (отрезки, светофор, план, диспетчерский)")
+                raise SystemExit(f"{f}: не похоже ни на одну из выгрузок (отрезки, светофор, план, диспетчерский, отчёты ПДО)")
+            todo.append((f, data, source))
+        # отчёты ПДО — в хронологии декад и версий, дата публикации — время изменения файла
+        todo.sort(key=lambda x: pdo.sort_key(x[2], Path(x[0]).name) if x[2] in pdo.KINDS else ())
+        for f, data, source in todo:
+            published = datetime.fromtimestamp(Path(f).stat().st_mtime) if source in pdo.KINDS else None
             with load_lock(engine):
-                print(f, load_file(engine, source, data, Path(f).name))
+                print(f, load_file(engine, source, data, Path(f).name, published_at=published))
     elif args.cmd == "sync":
         from .sync import run_sync
         engine = make_engine(settings.database_url)

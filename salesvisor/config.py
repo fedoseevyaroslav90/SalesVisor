@@ -32,6 +32,12 @@ class Settings:
     # Писать ли комментарии в задачи при переносе декады
     bitrix_post_comments: bool = field(default_factory=lambda: _env("BITRIX_POST_COMMENTS", "0") == "1")
 
+    # Задачи Битрикса, из вложений которых брать отчёты ПДО, по материалам и загрузку переделов (через запятую),
+    # например «321346» — «ВАЖНЫЕ НОВОСТИ У2 2026 год». Читаются по BITRIX_WEBHOOK_URL, только чтение
+    pdo_task_ids: tuple = field(default_factory=lambda: tuple(t.strip() for t in _env("PDO_TASK_IDS").split(",") if t.strip()))
+    # Отчёты по материалам старше стольких дней не скачивать (каждый ~15–80 МБ; нужна только свежая картина)
+    pdo_materials_days: int = field(default_factory=lambda: int(_env("PDO_MATERIALS_DAYS", "20") or 20))
+
     # Папка, куда завод кладёт выгрузки (SFTP контура: /data/SAP/salesvisor). Работает, когда Metabase недоступен
     import_dir: str = field(default_factory=lambda: _env("IMPORT_DIR"))
 
