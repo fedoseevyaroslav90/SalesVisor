@@ -144,7 +144,9 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
     """Возвращает (отрезки, сводку по позициям)."""
     _check_columns(df, SEGMENTS_REQUIRED, "Отчёт по отрезкам")
     product_col = "Материал.1" if "Материал.1" in df.columns else "Материал"
-    amount_col = next((c for c in df.columns if c.startswith("СУММА ЗАКАЗА, РУБ. (СУММА ВАЛ")), None)
+    amount_col = _money_col(df.columns, "сумма заказа руб")
+    mp_col = _money_col(df.columns, "мп рас")    # «МП (рассчетно) …» и «МП (расчетно) …» — оба написания бывают
+    mz_col = _money_col(df.columns, "мз рас")
 
     segs: dict[tuple[str, str, str], dict] = {}
     agg: dict[tuple[str, str], dict] = {}
@@ -190,7 +192,8 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
                 "bitrix_task": p.parse_bitrix_task(raw_task),
                 "segments_total": 0, "segments_produced": 0, "segments_stock": 0, "segments_ready": 0,
                 "segments_in_transit": 0, "segments_shipped": 0, "segments_invoiced": 0,
-                "length_plan": 0.0, "amount_rub": 0.0, "last_fact_ship_date": None,
+                "length_plan": 0.0, "amount_rub": 0.0, "mp_rub": 0.0 if mp_col else None,
+                "mz_rub": 0.0 if mz_col else None, "last_fact_ship_date": None,
             }
         a["segments_total"] += 1
         for flag in ("produced", "stock", "ready", "in_transit", "shipped", "invoiced"):
@@ -198,6 +201,11 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
         a["length_plan"] += seg["length"] or 0
         if amount_col:
             a["amount_rub"] += p.parse_number(r.get(amount_col)) or 0
+        # МП и МЗ в отчёте — на отрезок; у позиции — сумма по её отрезкам (как в пилоте)
+        if mp_col:
+            a["mp_rub"] += p.parse_number(r.get(mp_col)) or 0
+        if mz_col:
+            a["mz_rub"] += p.parse_number(r.get(mz_col)) or 0
         if seg["fact_ship_date"] and (not a["last_fact_ship_date"] or seg["fact_ship_date"] > a["last_fact_ship_date"]):
             a["last_fact_ship_date"] = seg["fact_ship_date"]
 
@@ -206,6 +214,17 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
         total = a["segments_total"]
         a["closed"] = total > 0 and (a["segments_shipped"] == total or a["segments_invoiced"] == total)
     return list(segs.values()), list(agg.values())
+
+
+def _money_col(columns, prefix: str) -> str | None:
+    """Денежная колонка отчёта по отрезкам по началу нормализованного заголовка. В выгрузках SAP бывают варианты
+    «… ВАЛ Х КУРС» и «… по тек. курсу»: берём «ВАЛ Х КУРС», иначе «по тек. курсу», иначе первую подходящую."""
+    cands = [c for c in columns if p.norm_header(c).startswith(prefix)]
+    for mark in ("вал х курс", "тек"):
+        for c in cands:
+            if mark in p.norm_header(c):
+                return c
+    return cands[0] if cands else None
 
 
 def stage_of(a: dict) -> str:

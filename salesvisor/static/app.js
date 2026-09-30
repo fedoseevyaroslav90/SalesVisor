@@ -100,8 +100,6 @@
       sel.value = items.includes(saved) ? saved : '';
     };
     const opts = items => items.map(v => ({ value: v, label: v }));
-    if (!$('#manager').value) $('#manager').value = store.get('manager');
-    if (!$('#dept').value) $('#dept').value = store.get('dept');
     MS.manager.setOptions(opts(state.meta.managers));
     MS.dept.setOptions(opts(state.meta.depts));
     fill($('#dayLine'), state.meta.lines || [], '');
@@ -123,7 +121,9 @@
 
   // ---------- заказы и позиции: отбор, сортировка, ссылка на отбор, выгрузка ----------
   const PAGE = 400, POS_PAGE = 300;
-  Object.assign(state, { view: 'orders', sort: '', posSort: '', shown: PAGE, positions: [], posTotal: 0, seq: 0 });
+  Object.assign(state, { view: 'orders', sort: '', posSort: '', shown: PAGE, positions: [], posTotal: 0, seq: 0,
+    expanded: new Set(), posCache: {} });
+  const kRub = v => (v == null ? '—' : num(v / 1000, 0));  // тыс. ₽
   const flagInputs = () => [...document.querySelectorAll('#filters [data-flag]')];
   const collator = new Intl.Collator('ru', { numeric: true, sensitivity: 'base' });
 
@@ -268,6 +268,8 @@
     if (seq !== state.seq) return;
     state.orders = orders;
     state.shown = PAGE;
+    state.expanded.clear();
+    state.posCache = {};
     render();
   }
   async function loadPositions(append, seq = ++state.seq) {
@@ -332,23 +334,76 @@
       const task = [bxLink('task', o.bitrix_task), bxLink('deal', o.bitrix_deal)].filter(Boolean).join('<br>');
       return `<tr data-no="${esc(o.order_no)}">
         <td><span class="dot ${COLOR_NAME[o.color] ? o.color : ''}" title="${esc(COLOR_NAME[o.color] || 'нет данных светофора')}"></span></td>
-        <td><b>${esc(o.order_no)}</b>${o.comments ? ` <span class="sub" title="Комментарии">💬${o.comments}</span>` : ''}${o.overdue ? `<div class="late-tag">просрочено поз.: ${o.overdue}</div>` : ''}${o.quality ? `<div class="q-tag" title="Сообщения о качестве">несоответствий: ${o.quality}</div>` : ''}</td>
+        <td><button class="exp" data-no="${esc(o.order_no)}" aria-expanded="${state.expanded.has(o.order_no)}" title="Позиции заказа">${state.expanded.has(o.order_no) ? '▾' : '▸'}</button><b>${esc(o.order_no)}</b>${o.comments ? ` <span class="sub" title="Комментарии">💬${o.comments}</span>` : ''}${o.overdue ? `<div class="late-tag">просрочено поз.: ${o.overdue}</div>` : ''}${o.quality ? `<div class="q-tag" title="Сообщения о качестве">несоответствий: ${o.quality}</div>` : ''}</td>
         <td>${esc(o.customer || '—')}</td>
         <td>${esc(o.sales_dept || '—')}<div class="sub">${esc(o.manager || '')}</div></td>
-        <td>${o.positions} ${o.red ? `<span class="cnt red">●${o.red}</span>` : ''}${o.yellow ? `<span class="cnt yellow">●${o.yellow}</span>` : ''}</td>
+        <td>${o.positions} ${o.red ? `<span class="cnt red">●${o.red}</span>` : ''}${o.yellow ? `<span class="cnt yellow">●${o.yellow}</span>` : ''}
+          <div class="sub"><span class="n-ok" title="Позиций, у которых все отрезки готовы или отгружены">готово ${o.ready_positions}</span>${o.positions - o.ready_positions ? ` · <span class="n-bad">не готово ${o.positions - o.ready_positions}</span>` : ''}</div></td>
         <td>${esc(o.first_decade || '—')}</td>
         <td>${esc(o.current_decade || '—')}</td>
         <td class="num ${o.max_shift > 30 ? 'neg' : ''}">${o.max_shift == null ? '—' : o.max_shift + ' дн.'}</td>
         <td>${ready === null ? '<span class="muted">нет</span>' : `<span class="bar"><i style="width:${ready}%"></i></span><span class="pct">${o.segments_ready}/${o.segments_total}</span>`}</td>
+        <td class="num">${kRub(o.mp_rub)}${o.days_late ? `<div class="sub ${o.days_late > 30 ? 'neg' : ''}">опозд. ${o.days_late} дн.</div>` : ''}</td>
         <td>${task}</td>
-      </tr>`;
+      </tr>` + (state.expanded.has(o.order_no) ? subRows(o.order_no) : '');
     }).join('');
-    document.querySelectorAll('#orders tbody tr').forEach(tr => tr.addEventListener('click', () => openOrder(tr.dataset.no)));
+    document.querySelectorAll('#orders tbody tr[data-no]').forEach(tr => tr.addEventListener('click', () => openOrder(tr.dataset.no)));
+    document.querySelectorAll('#orders .exp').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); toggleOrder(b.dataset.no); }));
+    $('#expandAll').hidden = !rows.length;
+    $('#expandAll').textContent = rows.slice(0, state.shown).every(o => state.expanded.has(o.order_no)) && rows.length ? 'Свернуть все' : 'Развернуть все';
     const rest = rows.length - state.shown;
     $('#ordersMore').hidden = rest <= 0;
     $('#ordersMore button').textContent = `Показать ещё ${Math.min(rest, PAGE)} (всего ${rows.length})`;
     markSort('#orders', state.sort);
   }
+
+  // ---------- позиции под строкой заказа ----------
+  function subRows(no) {
+    const ps = state.posCache[no];
+    const cell = html => `<tr class="sub-row" data-for="${esc(no)}"><td></td><td colspan="10">${html}</td></tr>`;
+    if (!ps) return cell('<span class="muted">Загружаю позиции…</span>');
+    return cell(`<table class="mini sub"><thead><tr><th>Поз.</th><th></th><th>Изделие</th><th>Первая декада</th><th>Срок сейчас</th>
+      <th>Смещ., дн.</th><th>Треб. дата</th><th>План отгрузки</th><th>Линия, окончание</th><th>Этап</th><th>Отрезки</th><th>МП, т. ₽</th></tr></thead><tbody>`
+      + ps.map(p => `<tr>
+        <td><b>${esc(p.pos)}</b></td>
+        <td><span class="dot ${COLOR_NAME[p.color] ? p.color : ''}"></span></td>
+        <td>${esc(p.product || '')}${p.quality ? ` <span class="q-tag">несоотв.: ${p.quality}</span>` : ''}</td>
+        <td>${esc(p.first_decade || '—')}</td>
+        <td>${esc(p.current_decade || fmt(p.due_date))}${p.overdue ? ' <span class="late-tag">просрочено</span>' : ''}</td>
+        <td class="num">${p.shift_days ?? '—'}</td>
+        <td>${fmt(p.required_date)}</td>
+        <td>${fmt(p.plan_ship_date || p.invoice_plan_date)}</td>
+        <td>${p.line ? `<b>${esc(p.line)}</b> ${fmt(p.plan_end_date)} ${esc(p.plan_end_time || '')}` : '<span class="muted">—</span>'}</td>
+        <td>${esc(p.stage)}${p.reject_code ? ` <span class="sub">${esc(p.reject_code)}</span>` : ''}</td>
+        <td class="${p.segments_total && p.segments_ready >= p.segments_total ? 'n-ok' : ''}">${p.segments_total ? `${p.segments_ready}/${p.segments_total}` : '—'}</td>
+        <td class="num">${kRub(p.mp_rub)}${p.days_late ? `<div class="sub">опозд. ${p.days_late} дн.</div>` : ''}</td>
+      </tr>`).join('') + '</tbody></table>');
+  }
+  // позиции подходят под тот же отбор, что и строка заказа; за раз — до 150 заказов одним запросом
+  async function fetchPositions(nos) {
+    const need = nos.filter(no => !state.posCache[no]);
+    for (let i = 0; i < need.length; i += 150) {
+      const chunk = need.slice(i, i + 150);
+      const d = await api('api/positions?' + new URLSearchParams({ ...baseParams(), ...filterParams(), order: chunk.join('|'),
+        sort: 'pos', limit: 1000 }));
+      for (const no of chunk) state.posCache[no] = [];
+      for (const p of d.rows) (state.posCache[p.order_no] ||= []).push(p);
+    }
+  }
+  async function toggleOrder(no) {
+    if (state.expanded.has(no)) state.expanded.delete(no); else state.expanded.add(no);
+    render();
+    if (state.expanded.has(no) && !state.posCache[no]) { await fetchPositions([no]).catch(showErr); render(); }
+  }
+  $('#expandAll').addEventListener('click', async () => {
+    const shown = sortRows(tileRows(state.orders), state.sort, orderKey).slice(0, state.shown).map(o => o.order_no);
+    const all = shown.every(no => state.expanded.has(no));
+    if (all) { shown.forEach(no => state.expanded.delete(no)); render(); return; }
+    shown.forEach(no => state.expanded.add(no));
+    render();
+    await fetchPositions(shown).catch(showErr);
+    render();
+  });
 
   function renderPositions() {
     const rows = state.positions;
@@ -361,13 +416,13 @@
         <td>${esc(p.customer || '—')}</td>
         <td>${esc(p.product || '')}</td>
         <td>${esc(p.manager || '')}</td>
-        <td>${esc(p.first_decade || '—')}</td>
-        <td>${esc(p.current_decade || fmt(p.due_date))}${p.overdue ? '<div class="late-tag">просрочено</div>' : ''}</td>
+        <td>${esc(p.first_decade || '—')} → ${esc(p.current_decade || fmt(p.due_date))}${p.overdue ? '<div class="late-tag">просрочено</div>' : ''}</td>
         <td class="num ${p.shift_days > 30 ? 'neg' : ''}">${p.shift_days ?? '—'}</td>
         <td>${fmt(p.plan_ship_date || p.invoice_plan_date)}</td>
         <td>${p.line ? `<b>${esc(p.line)}</b><div class="sub">${fmt(p.plan_end_date)} ${esc(p.plan_end_time || '')}</div>` : '<span class="muted">—</span>'}</td>
-        <td>${esc(p.stage)}${p.reject_code ? ` <span class="sub" title="${esc(p.reject_text || 'причина отклонения')}">${esc(p.reject_code)}</span>` : ''}${p.disp_decade ? `<div class="sub">${esc(p.disp_decade)}</div>` : ''}</td>
-        <td>${p.segments_total ? `${p.segments_ready}/${p.segments_total}` : '—'}</td>
+        <td>${esc(p.stage)}${p.reject_code ? ` <span class="sub" title="${esc(p.reject_text || 'причина отклонения')}">${esc(p.reject_code)}</span>` : ''}
+          <div class="sub">${p.segments_total ? `отрезков ${p.segments_ready}/${p.segments_total}` : ''}${p.disp_decade ? ` · ${esc(p.disp_decade)}` : ''}</div></td>
+        <td class="num">${kRub(p.mp_rub)}${p.days_late ? `<div class="sub ${p.days_late > 30 ? 'neg' : ''}">опозд. ${p.days_late} дн.</div>` : ''}</td>
         <td>${p.quality ? `<div class="q-tag">несоотв.: ${p.quality}</div>` : ''}${p.comments ? `<span class="sub" title="Комментарии к заказу">💬${p.comments}</span> ` : ''}${bxLink('task', p.bitrix_task)}</td>
       </tr>`).join('');
     document.querySelectorAll('#positions tbody tr').forEach(tr => tr.addEventListener('click', () => openOrder(tr.dataset.no)));
@@ -383,6 +438,7 @@
     $('#ordersWrap').hidden = v !== 'orders';
     $('#positionsWrap').hidden = v === 'orders';
     $('#tiles').hidden = v !== 'orders';
+    $('#expandAll').hidden = v !== 'orders';
   }
   document.querySelectorAll('.view-switch button').forEach(b => b.addEventListener('click', () => {
     if (b.dataset.view === state.view) return;
@@ -396,8 +452,8 @@
 
   let timer;
   const reload = () => { clearTimeout(timer); timer = setTimeout(() => loadOrders().catch(showErr), 300); };
-  $('#manager').addEventListener('change', e => { store.set('manager', e.target.value); reload(); });
-  $('#dept').addEventListener('change', e => { store.set('dept', e.target.value); reload(); });
+  $('#manager').addEventListener('change', e => { reload(); });
+  $('#dept').addEventListener('change', e => { reload(); });
   $('#search').addEventListener('input', reload);
   $('#scope').addEventListener('change', reload);
   [...document.querySelectorAll('#filters select, #filters input')].filter(el => !el.closest('.ms')).forEach(el => el.addEventListener(el.type === 'text' || el.type === 'number' || el.type === 'search' || el.id === 'fCustomer' ? 'input' : 'change', reload));
@@ -518,7 +574,6 @@
     if (!login) { openMe(); return; }
     $('#manager').value = login;
     refreshMulti();
-    store.set('manager', login);
     loadOrders().catch(showErr);
   });
   $('#meSet').addEventListener('click', () => { $('#mePop').hidden ? openMe() : ($('#mePop').hidden = true); });

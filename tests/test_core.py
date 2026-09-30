@@ -398,3 +398,26 @@ def test_user_prefs_per_portal_user():
     assert client.put("/api/prefs", headers=petr, json={"views": [{"name": "x" * 61, "query": ""}]}).status_code == 422
     # без сотрудника от портала преднастроек нет
     assert client.get("/api/prefs", headers={"X-SalesVisor-Token": "s3cret"}).status_code == 400
+
+
+def test_mp_mz_priority_and_order_expand():
+    """МП и МЗ — сумма по отрезкам позиции; приоритет = МП × дни опоздания к первой дате; позиции одного заказа."""
+    from salesvisor.queries import Filters, list_orders, list_positions
+
+    engine = make_engine("sqlite:///:memory:")
+    rows = [seg_row("1200000071", "10", "1", "10 октября, 2026"), seg_row("1200000071", "10", "2", "10 октября, 2026"),
+            seg_row("1200000072", "10", "1", "10 октября, 2026")]
+    for r, mp, mz in zip(rows, ("1 000,50", "2 000", "500"), ("300", "700", "100")):
+        r.update({"МП (рассчетно) ВАЛ Х КУРС": mp, "МЗ (рассчетно) ВАЛ Х КУРС": mz, "МП (расчетно) по тек. курсу": "999999"})
+    load_segments(engine, pd.DataFrame(rows), "d1")
+    load_svetofor(engine, pd.DataFrame([svet_row("1200000071", "10", "1Д09", "1Д10", "30", "red"),
+                                        svet_row("1200000072", "10", "1Д10", "1Д10", "0", "green")]), "d1")
+    today = date(2026, 9, 30)
+    p = {x["order_no"]: x for x in list_positions(engine, today=today)["rows"]}
+    assert p["1200000071"]["mp_rub"] == 3000.5 and p["1200000071"]["mz_rub"] == 1000  # «ВАЛ Х КУРС», а не «по тек. курсу»
+    # первая дата 10.09, срок сейчас 10.10 → опоздание 30 дней; у второй позиции срок = первой дате, но сегодня раньше
+    assert p["1200000071"]["days_late"] == 30 and p["1200000071"]["priority"] == round(3000.5 * 30)
+    assert p["1200000072"]["days_late"] == 0 and p["1200000072"]["priority"] == 0
+    o = {x["order_no"]: x for x in list_orders(engine, today=today)}
+    assert o["1200000071"]["mp_rub"] == 3000.5 and o["1200000071"]["priority"] == round(3000.5 * 30)
+    assert [x["pos"] for x in list_positions(engine, filters=Filters.from_query(order="1200000072"), today=today)["rows"]] == ["10"]

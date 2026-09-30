@@ -223,16 +223,17 @@ th.sort-desc::after { content: " ▼"; font-size: 10px; color: var(--accent); }
 .more[hidden] { display: none; }
 #found { margin: -6px 0 8px; }
 .tiles[hidden] { display: none; }
-#positions td:nth-child(3), #positions td:nth-child(4), #positions td:nth-child(10), #positions td:nth-child(11),
-#positions td:nth-child(13) { white-space: normal; overflow-wrap: anywhere; }
+/* лента позиций: 3 клиент, 4 изделие, 9 линия, 10 этап, 12 отметки — переносятся */
+#positions td:nth-child(3), #positions td:nth-child(4), #positions td:nth-child(9), #positions td:nth-child(10),
+#positions td:nth-child(12) { white-space: normal; overflow-wrap: anywhere; }
 #positions td:nth-child(4) { min-width: 200px; }
-#positions td:nth-child(11) { min-width: 120px; overflow-wrap: normal; }
-#positions td:nth-child(13) { min-width: 90px; }
+#positions td:nth-child(10) { min-width: 120px; overflow-wrap: normal; }
+#positions td:nth-child(12) { min-width: 90px; }
 @media (max-width: 1280px) {
   .filters #fCustomer { width: 150px; }
   #positions td:nth-child(4) { min-width: 140px; }
-  #positions td:nth-child(11) { min-width: 90px; }
-  #positions td:nth-child(13) { min-width: 60px; }
+  #positions td:nth-child(10) { min-width: 90px; }
+  #positions td:nth-child(12) { min-width: 60px; }
 }
 
 /* ---- выбор нескольких значений (30.09.2026) ---- */
@@ -261,3 +262,20 @@ th.sort-desc::after { content: " ▼"; font-size: 10px; color: var(--accent); }
 .me-pop label { display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
 .me-pop select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
 .me-pop .ms-acts { gap: 10px; }
+
+/* ---- заказ → позиции, МП (30.09.2026) ---- */
+.found-bar { display: flex; align-items: baseline; gap: 12px; margin: -6px 0 8px; }
+.found-bar #found { margin: 0; }
+.found-bar .linkish-btn[hidden] { display: none; }
+.exp { border: 0; background: none; cursor: pointer; color: var(--muted); width: 18px; padding: 0; margin-right: 4px; font-size: 12px; }
+.exp:hover { color: var(--accent); }
+tr.sub-row > td { background: #f8f9fb; padding: 4px 10px 10px; cursor: default; }
+tr.sub-row:hover { background: none; }
+table.mini.sub { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+table.mini.sub th { position: static; font-size: 11px; }
+table.mini.sub td:nth-child(3) { min-width: 180px; }
+.n-ok { color: var(--ok); }
+.n-bad { color: var(--overdue); }
+#orders td:nth-child(2), #orders td:nth-child(5) { white-space: normal; }
+#orders td:nth-child(2) { min-width: 130px; }
+#orders td:nth-child(2) .late-tag, #orders td:nth-child(2) .q-tag, #orders td:nth-child(5) span { white-space: nowrap; }

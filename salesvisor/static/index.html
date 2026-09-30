@@ -87,7 +87,8 @@
         <button class="linkish-btn" id="fReset">Сбросить отбор</button>
       </div>
       <div class="tiles" id="tiles"></div>
-      <p class="meta-line" id="found"></p>
+      <div class="found-bar"><p class="meta-line" id="found"></p>
+        <button class="linkish-btn" id="expandAll" title="Показать позиции у всех заказов на экране">Развернуть все</button></div>
       <div class="table-wrap" id="ordersWrap">
         <table id="orders">
           <thead>
@@ -101,6 +102,7 @@
               <th data-sort="nearest_due" title="Где заказ сейчас (ближайший срок)">Текущая декада</th>
               <th data-sort="max_shift" title="Наибольшее смещение по позициям">Смещение</th>
               <th data-sort="ready" title="Готово к отгрузке и отгружено отрезков">Отрезки</th>
+              <th data-sort="priority" title="МП заказа, тыс. ₽, и опоздание к первой дате клиента. Сортировка — по приоритету: МП × дни опоздания">МП / опоздание</th>
               <th data-sort="bitrix_task">Битрикс</th>
             </tr>
           </thead>
@@ -118,13 +120,12 @@
               <th data-sort="customer">Клиент</th>
               <th data-sort="product">Изделие</th>
               <th data-sort="manager">Менеджер</th>
-              <th data-sort="first_decade_end" title="Первая требуемая дата клиента">Первая декада</th>
-              <th data-sort="due_date" title="Текущая декада светофора, иначе треб. дата">Срок сейчас</th>
+              <th data-sort="due_date" title="Первая декада (обещано клиенту) → текущая декада светофора (иначе треб. дата). Сортировка — по сроку сейчас">Декада: первая → сейчас</th>
               <th data-sort="shift_days">Смещ., дн.</th>
               <th data-sort="plan_ship_date">План отгрузки</th>
               <th data-sort="plan_end_date" title="План производства: линия и плановое окончание">Линия, окончание</th>
-              <th data-sort="stage">Этап</th>
-              <th data-sort="ready" title="Готово к отгрузке и отгружено отрезков">Отрезки</th>
+              <th data-sort="stage" title="Этап по отчёту по отрезкам и готово отрезков (готовы к отгрузке и отгружены)">Этап, отрезки</th>
+              <th data-sort="priority" title="МП позиции, тыс. ₽, и опоздание к первой дате клиента. Сортировка — по приоритету: МП × дни опоздания">МП / опозд.</th>
               <th data-sort="quality">Отметки</th>
             </tr>
           </thead>

@@ -58,6 +58,8 @@ positions = Table(
     Column("length_plan", Float),
     Column("unit", String(10)),
     Column("amount_rub", Float),
+    Column("mp_rub", Float),              # МП (расчётно) позиции — сумма по отрезкам, как в пилоте VOLS-Zakazy
+    Column("mz_rub", Float),              # МЗ (расчётно) позиции — сумма по отрезкам
     Column("bitrix_raw", String(300)),
     Column("bitrix_task", String(20)),
     Column("stage", String(40)),

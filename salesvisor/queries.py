@@ -52,8 +52,14 @@ def position_view(pos: dict, today: date) -> dict:
     overdue = bool(has_segments and due_d and due_d < today and not pos.get("closed"))
     # «Хвосты»: срок прошёл больше полугода назад, а позиция так и висит открытой
     stale = bool(due_d and (today - due_d).days > STALE_DAYS and not pos.get("closed"))
+    # Опоздание к обещанию клиенту: max(срок сейчас, сегодня) − первая дата клиента (конец первой декады).
+    # Приоритет — МП × дни опоздания («Критичные заказы», 10–11.06.2026): чем дороже и дольше, тем выше
+    first = pos.get("first_decade_end")
+    first_d = date.fromisoformat(first) if isinstance(first, str) else first
+    late = max(((max(due_d, today) if due_d else today) - first_d).days, 0) if first_d and not pos.get("closed") else 0
     return {**{k: _iso(v) for k, v in pos.items()}, "due_date": _iso(due_d), "overdue": overdue, "stale": stale,
-            "stage": pos.get("stage") or "Нет в отчёте по отрезкам"}
+            "stage": pos.get("stage") or "Нет в отчёте по отрезкам", "days_late": late,
+            "priority": round((pos.get("mp_rub") or 0) * late)}
 
 
 def vals(v: str | None, codes: bool = False) -> list[str]:
@@ -126,6 +132,7 @@ class Filters:
     """Отбор на уровне позиции (одинаковый для заказов, позиций и выгрузки в Excel). Пустое поле — не отбирать.
     Заказ попадает в список, если под отбор подошла хотя бы одна его позиция; считается он по подошедшим позициям."""
     q: str = ""                   # заказ, клиент, менеджер, изделие — подстрока
+    order: str = ""               # номера заказов через «|» — позиции развёрнутых заказов
     customer: str = ""            # клиент — подстрока
     line: str = ""                # линия (рабочее место); «-» — без линии
     stage: str = ""               # группа этапа, см. STAGE_GROUPS; несколько — через запятую
@@ -142,7 +149,8 @@ class Filters:
     @classmethod
     def from_query(cls, **kw) -> "Filters":
         shift = str(kw.get("shift_min") or "").strip()
-        return cls(q=(kw.get("q") or "").strip().lower(), customer=(kw.get("customer") or "").strip().lower(),
+        return cls(q=(kw.get("q") or "").strip().lower(), order=(kw.get("order") or "").strip(),
+                   customer=(kw.get("customer") or "").strip().lower(),
                    line=(kw.get("line") or "").strip(), stage=(kw.get("stage") or "").strip(),
                    color=(kw.get("color") or "").strip(),
                    due_from=_date(kw.get("due_from")), due_to=_date(kw.get("due_to")),
@@ -152,6 +160,8 @@ class Filters:
                    flags=frozenset(f for f in (kw.get("flags") or "").split(",") if f))
 
     def match(self, p: dict) -> bool:
+        if self.order and p.get("order_no") not in vals(self.order):
+            return False
         if self.q and not any(self.q in str(p.get(f) or "").lower() for f in ("order_no", "customer", "manager", "product")):
             return False
         if self.customer and self.customer not in str(p.get("customer") or "").lower():
@@ -186,7 +196,8 @@ POSITION_FIELDS = ("order_no", "pos", "customer", "sales_dept", "manager", "prod
                    "first_decade_end", "current_decade", "current_decade_end", "due_date", "shift_days", "required_date",
                    "plan_ship_date", "invoice_plan_date", "line", "plan_end_date", "plan_end_time", "stage",
                    "segments_total", "segments_ready", "overdue", "stale", "disp_decade", "disp_ready", "length_plan",
-                   "unit", "amount_rub", "quality", "comments", "bitrix_task", "bitrix_deal", "reject_code", "reject_text")
+                   "unit", "amount_rub", "quality", "comments", "bitrix_task", "bitrix_deal", "reject_code", "reject_text",
+                   "mp_rub", "mz_rub", "days_late", "priority")
 
 
 def _filtered_positions(engine: Engine, scope: str, manager: str, dept: str, f: Filters, today: date) -> list[dict]:
@@ -284,6 +295,11 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
             "bitrix_task": next((p["bitrix_task"] for p in ps if p.get("bitrix_task")), None),
             "bitrix_deal": first.get("bitrix_deal"),
             "amount_rub": sum(p.get("amount_rub") or 0 for p in ps),
+            # финансы заказа складываются по позициям; приоритет заказа — МП заказа × опоздание худшей позиции
+            "mp_rub": sum(p.get("mp_rub") or 0 for p in ps) if any(p.get("mp_rub") is not None for p in ps) else None,
+            "mz_rub": sum(p.get("mz_rub") or 0 for p in ps) if any(p.get("mz_rub") is not None for p in ps) else None,
+            "days_late": max(p["days_late"] for p in ps),
+            "ready_positions": sum(1 for p in ps if (p.get("segments_total") or 0) and p["segments_ready"] >= p["segments_total"]),
             "comments": first["comments"],
             "quality": sum(p["quality"] for p in ps),
             "lines": sorted({p["line"] for p in ps if p.get("line")}),
@@ -294,6 +310,8 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
         out.append(order)
 
     # Сверху просроченные, потом красные, жёлтые, внутри — по величине смещения
+    for o in out:
+        o["priority"] = round((o["mp_rub"] or 0) * o["days_late"])
     out.sort(key=lambda o: (0 if o["overdue"] else 1, COLOR_RANK.get(o["color"], 3), -(o["max_shift"] or 0), o["nearest_due"] or "9999"))
     return out
 
