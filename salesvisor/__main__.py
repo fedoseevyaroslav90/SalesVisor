@@ -12,11 +12,14 @@ from pathlib import Path
 
 from .config import get_settings
 from .db import make_engine
-from .ingest import detect_source, load_file, read_table
+from .ingest import load_file, load_lock, sniff_source
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # httpx на INFO пишет полный адрес запроса — а в адресе вебхука Битрикс24 ключ
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
     ap = argparse.ArgumentParser(prog="salesvisor")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve")
@@ -37,10 +40,11 @@ def main() -> None:
         engine = make_engine(settings.database_url)
         for f in args.files:
             data = Path(f).read_bytes()
-            source = detect_source(list(read_table(data, f).columns))
+            source = sniff_source(data, f)
             if not source:
-                raise SystemExit(f"{f}: не похоже ни на светофор, ни на отчёт по отрезкам")
-            print(f, load_file(engine, source, data, Path(f).name))
+                raise SystemExit(f"{f}: не похоже ни на одну из выгрузок (отрезки, светофор, план, диспетчерский)")
+            with load_lock(engine):
+                print(f, load_file(engine, source, data, Path(f).name))
     elif args.cmd == "sync":
         from .sync import run_sync
         engine = make_engine(settings.database_url)

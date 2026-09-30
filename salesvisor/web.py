@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import hmac
 import re
+import zipfile
 from pathlib import Path
 from urllib.parse import unquote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from openpyxl.utils.exceptions import InvalidFileException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -18,17 +21,19 @@ from . import queries
 from .config import Settings, get_settings
 from .bitrix import Bitrix, live_info
 from .db import bitrix_links, comments, make_engine
-from .ingest import detect_source, load_file, read_table
+from .ingest import LoadBusy, load_file, load_lock, sniff_source
 from .metabase import MetabaseError
 from .sync import SyncError, run_sync
 
 STATIC = Path(__file__).parent / "static"
+# Предел загружаемой выгрузки: CSV отчёта по отрезкам — около 70 МБ, xlsx того же отчёта — около 30 МБ
+MAX_UPLOAD_MB = 150
 
 
 class CommentIn(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     author: str = Field(default="", max_length=100)
-    pos: str | None = None
+    pos: str | None = Field(default=None, max_length=10)
 
 
 class BitrixLinkIn(BaseModel):
@@ -49,7 +54,9 @@ def _id_or_none(v: str) -> str | None:
 def create_app(engine: Engine | None = None, settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     engine = engine or make_engine(settings.database_url)
-    app = FastAPI(title="SalesVisor", docs_url="/api/docs")
+    # Документация API выключена: Swagger и ReDoc грузят скрипты с внешнего CDN, а за порталом страницы
+    # сервиса открываются на origin портала, где в localStorage лежит ключ сотрудника
+    app = FastAPI(title="SalesVisor", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
     async def portal_guard(request: Request, call_next):
@@ -61,10 +68,27 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
         return await call_next(request)
 
     def user_of(request: Request, fallback: str = "") -> str:
-        # ФИО и алиас сотрудника ставит портал (ФИО в percent-encoding), иначе заголовок другого прокси
+        # ФИО и алиас сотрудника ставит портал (ФИО в percent-encoding). За порталом — только они:
+        # имя из тела запроса или заголовка другого прокси подменило бы автора
         person = unquote(request.headers.get("x-salesvisor-person", "")).strip()
         alias = request.headers.get("x-salesvisor-user", "").strip()
+        if settings.portal_token:
+            return person or alias or "без имени"
         return person or alias or request.headers.get("x-remote-user") or fallback.strip() or "без имени"
+
+    def can_upload(request: Request) -> bool:
+        # Роль ставит портал: editor — загрузка выгрузок и «Обновить сейчас», viewer — остальное.
+        # Без портала (PORTAL_TOKEN пуст, локальный запуск) можно всё
+        return not settings.portal_token or request.headers.get("x-salesvisor-role", "") == "editor"
+
+    def require_upload(request: Request) -> None:
+        if not can_upload(request):
+            raise HTTPException(403, "Загружать выгрузки может сотрудник с правом загрузки — его выдаёт руководитель программы ИИ")
+
+    def order_no_ok(order_no: str) -> str:
+        if not re.fullmatch(r"[\w.-]{1,20}", order_no):
+            raise HTTPException(404, "Заказ не найден")
+        return order_no
 
     @app.get("/api/health")
     def api_health():
@@ -77,7 +101,8 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
     @app.get("/api/meta")
     def api_meta(request: Request):
         portal_user = user_of(request, "") if settings.portal_token else ""
-        return {**queries.meta(engine), "portal_user": portal_user, "bitrix_task_url": settings.bitrix_task_url,
+        return {**queries.meta(engine), "portal_user": portal_user, "can_upload": can_upload(request),
+                "bitrix_task_url": settings.bitrix_task_url,
                 "bitrix_deal_url": settings.bitrix_deal_url, "bitrix_ready": bool(settings.bitrix_webhook_url),
                 "metabase_ready": settings.metabase_ready, "import_dir": bool(settings.import_dir)}
 
@@ -87,13 +112,14 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
 
     @app.get("/api/orders/{order_no}")
     def api_order(order_no: str):
-        card = queries.order_card(engine, order_no)
+        card = queries.order_card(engine, order_no_ok(order_no))
         if not card:
             raise HTTPException(404, "Заказ не найден")
         return card
 
     @app.post("/api/orders/{order_no}/comments")
     def api_comment(order_no: str, body: CommentIn, request: Request):
+        order_no_ok(order_no)
         with engine.begin() as conn:
             conn.execute(insert(comments).values(order_no=order_no, pos=body.pos, text=body.text.strip(),
                                                  author=user_of(request, body.author)))
@@ -101,6 +127,7 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
 
     @app.put("/api/orders/{order_no}/bitrix")
     def api_bitrix_link(order_no: str, body: BitrixLinkIn, request: Request):
+        order_no_ok(order_no)
         task, deal = _id_or_none(body.task_id), _id_or_none(body.deal_id)
         with engine.begin() as conn:
             conn.execute(delete(bitrix_links).where(bitrix_links.c.order_no == order_no))
@@ -113,11 +140,15 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
     def api_bitrix_live(order_no: str):
         if not settings.bitrix_webhook_url:
             return {"configured": False}
-        card = queries.order_card(engine, order_no)
+        card = queries.order_card(engine, order_no_ok(order_no))
         if not card:
             raise HTTPException(404, "Заказ не найден")
         b = card["bitrix"]
-        return {"configured": True, **live_info(Bitrix(settings), b["task_id"], b["deal_id"])}
+        bx = Bitrix(settings)
+        try:
+            return {"configured": True, **live_info(bx, b["task_id"], b["deal_id"])}
+        finally:
+            bx.close()
 
     @app.get("/api/day")
     def api_day(date: str = "", manager: str = "", dept: str = "", line: str = "", backlog: bool = False):
@@ -136,22 +167,34 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
     def api_changes(days: int = 7, manager: str = ""):
         return queries.recent_changes(engine, days=max(1, min(days, 90)), manager=manager)
 
-    @app.post("/api/upload")
-    async def api_upload(file: UploadFile = File(...), source: str = Form("")):
-        data = await file.read()
+    def _load_upload(data: bytes, filename: str, source: str) -> dict:
+        """Разбор и запись — в пуле потоков: pandas на десятках мегабайт не должен держать остальные запросы."""
         try:
+            source = source or sniff_source(data, filename) or ""
             if not source:
-                source = detect_source(list(read_table(data, file.filename or "").columns)) or ""
-                if not source:
-                    raise ValueError("Не похоже ни на светофор, ни на отчёт по отрезкам")
-            return load_file(engine, source, data, file.filename or source)
-        except ValueError as e:
-            raise HTTPException(400, str(e)) from e
+                raise ValueError("Не похоже ни на одну из выгрузок: отрезки, светофор, план производства, диспетчерский")
+            with load_lock(engine, wait=False):
+                return load_file(engine, source, data, filename or source)
+        except LoadBusy as e:
+            raise HTTPException(409, str(e)) from e
+        except (ValueError, KeyError, zipfile.BadZipFile, InvalidFileException) as e:
+            raise HTTPException(400, f"Файл не разобран: {str(e)[:300]}") from e
+
+    @app.post("/api/upload")
+    async def api_upload(request: Request, file: UploadFile = File(...), source: str = Form("")):
+        require_upload(request)
+        if (file.size or 0) > MAX_UPLOAD_MB * 2**20:
+            raise HTTPException(413, f"Файл больше {MAX_UPLOAD_MB} МБ")
+        data = await file.read()
+        return await run_in_threadpool(_load_upload, data, file.filename or "", source)
 
     @app.post("/api/sync")
-    def api_sync():
+    def api_sync(request: Request):
+        require_upload(request)
         try:
-            return run_sync(engine, settings)
+            return run_sync(engine, settings, wait=False)
+        except LoadBusy as e:
+            raise HTTPException(409, str(e)) from e
         except (MetabaseError, SyncError) as e:
             raise HTTPException(400, str(e)) from e
 

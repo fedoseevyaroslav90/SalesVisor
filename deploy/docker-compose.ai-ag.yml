@@ -1,0 +1,48 @@
+# Надстройка над docker-compose.yml для узла ai-ag контура «Инкаб ИИ» (30.09.2026).
+# Запускает её deploy/деплой_ai-ag.sh:
+#   docker compose -p salesvisor -f docker-compose.yml -f deploy/docker-compose.ai-ag.yml up -d
+# Что меняет относительно базового файла:
+#   - веб публикуется на 127.0.0.1 (проверки на узле) и на WEB_BIND=172.16.50.30 (прокси портала с ai-gw);
+#     наружу порт не виден;
+#   - база — в каталоге /opt/salesvisor/pgdata (в резервную копию узла, а не в безымянный том docker);
+#   - постоянные имена контейнеров, пределы памяти, ротация журналов, проверка здоровья веба.
+services:
+  db:
+    container_name: salesvisor-db
+    image: postgres:16
+    environment:
+      TZ: Asia/Yekaterinburg
+      PGTZ: Asia/Yekaterinburg
+    volumes:
+      - /opt/salesvisor/pgdata:/var/lib/postgresql/data
+    mem_limit: 2g
+    logging: &logs
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U salesvisor -d salesvisor"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  web:
+    container_name: salesvisor-web
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8102}:8000"
+    mem_limit: 3g
+    logging: *logs
+    depends_on:
+      db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"]
+      interval: 60s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  sync:
+    container_name: salesvisor-sync
+    mem_limit: 4g
+    logging: *logs
+    depends_on:
+      db: { condition: service_healthy }

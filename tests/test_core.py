@@ -1,3 +1,5 @@
+import os
+import time
 from datetime import date
 
 import pandas as pd
@@ -138,11 +140,16 @@ def test_import_folder_and_portal_guard(tmp_path):
     pd.DataFrame([svet_row("1200000007", "10", "3Д09", "1Д10", "10", "yellow")]).to_csv(inbox / "svetofor.csv", index=False)
     pd.DataFrame([seg_row("1200000007", "10", "1", "30 сентября, 2026")]).to_csv(inbox / "otrezki.csv", index=False)
     (inbox / "readme.csv").write_text("a,b\n1,2\n")
+    old = time.time() - 600
+    for f in inbox.iterdir():
+        os.utime(f, (old, old))
+    # файл, который ещё докачивается по SFTP (свежий), в этот проход не берётся
+    pd.DataFrame([seg_row("1200000008", "10", "1", "30 сентября, 2026")]).to_csv(inbox / "idet.csv", index=False)
     settings = Settings(database_url="sqlite:///:memory:", import_dir=str(inbox), portal_token="s3cret")
 
     res = run_sync(engine, settings)
     assert [r["source"] for r in res] == ["segments", "svetofor"]  # отрезки раньше светофора
-    assert not any(f.is_file() for f in inbox.iterdir())
+    assert [f.name for f in inbox.iterdir() if f.is_file()] == ["idet.csv"]
     assert len(list((inbox / "done").iterdir())) == 2 and len(list((inbox / "failed").iterdir())) == 1
 
     client = TestClient(create_app(engine, settings))
@@ -154,6 +161,43 @@ def test_import_folder_and_portal_guard(tmp_path):
     assert client.get("/api/meta", headers=h).json()["portal_user"] == "Иванова А."
     assert client.post("/api/orders/1200000007/comments", json={"text": "Проверка", "author": "кто-то"}, headers=h).status_code == 200
     assert client.get("/api/orders/1200000007", headers=h).json()["comments"][0]["author"] == "Иванова А."
+    # автор за порталом — только из заголовков портала: ни тело, ни X-Remote-User его не подменят
+    h2 = {"X-SalesVisor-Token": "s3cret", "X-Remote-User": "chuzhoy"}
+    client.post("/api/orders/1200000007/comments", json={"text": "Второй", "author": "кто-то"}, headers=h2)
+    assert {c["author"] for c in client.get("/api/orders/1200000007", headers=h).json()["comments"]} == {"Иванова А.", "без имени"}
+
+    # роли: смотрящему загрузка и «Обновить сейчас» закрыты, загружающему — открыты
+    viewer, editor = {**h, "X-SalesVisor-Role": "viewer"}, {**h, "X-SalesVisor-Role": "editor"}
+    csv = pd.DataFrame([svet_row("1200000007", "10", "3Д09", "2Д10", "20", "red")]).to_csv(index=False).encode()
+    assert client.get("/api/meta", headers=viewer).json()["can_upload"] is False
+    assert client.get("/api/meta", headers=editor).json()["can_upload"] is True
+    assert client.post("/api/upload", files={"file": ("s.csv", csv)}, headers=viewer).status_code == 403
+    assert client.post("/api/sync", headers=viewer).status_code == 403
+    r = client.post("/api/upload", files={"file": ("s.csv", csv)}, headers=editor)
+    assert r.status_code == 200 and r.json()["source"] == "svetofor"
+    assert client.post("/api/upload", files={"file": ("x.csv", b"a;b\n1;2\n")}, headers=editor).status_code == 400
+    assert client.post("/api/upload", files={"file": ("x.xlsx", b"not a zip")}, headers=editor).status_code == 400
+    # документация API с внешним CDN за порталом не отдаётся
+    assert client.get("/api/docs", headers=h).status_code == 404 and client.get("/openapi.json", headers=h).status_code == 404
+
+
+def test_dirty_rows_do_not_break_load():
+    """Повтор позиции, цвет вне списка, отрезок без номера и слишком длинные строки — загрузка проходит."""
+    from salesvisor.db import positions
+    from salesvisor.ingest import _fit
+
+    engine = make_engine("sqlite:///:memory:")
+    segs = pd.DataFrame([seg_row("1200000021", "10", None, "30 сентября, 2026"), seg_row("1200000021", "10", None, "30 сентября, 2026")])
+    r = load_segments(engine, segs, "d1")
+    assert r["positions"] == 1 and order_card(engine, "1200000021")["positions"][0]["segments_total"] == 2
+    svet = pd.DataFrame([svet_row("1200000021", "10", "3Д09", "3Д09", "0", "green"),
+                         svet_row("1200000021", "10", "3Д09", "1Д10", "10", '"><img src=x onerror=alert(1)>')])
+    r = load_svetofor(engine, svet, "d1")
+    assert r["positions"] == 1
+    p0 = order_card(engine, "1200000021")["positions"][0]
+    assert p0["current_decade"] == "1Д10" and p0["color"] is None
+    row = _fit(positions, [{"first_decade": "3Д12 (2025) перенос", "customer": "x" * 500}])[0]
+    assert row["first_decade"] == "3Д12 (2025" and len(row["customer"]) == 300
 
 
 def test_plan_dispatcher_and_day():

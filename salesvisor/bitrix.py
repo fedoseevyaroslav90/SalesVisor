@@ -21,6 +21,9 @@ class Bitrix:
             raise BitrixError("Не задан BITRIX_WEBHOOK_URL")
         self.http = client or httpx.Client(base_url=settings.bitrix_webhook_url + "/", timeout=60)
 
+    def close(self) -> None:
+        self.http.close()
+
     def call(self, method: str, params: dict) -> dict:
         try:
             r = self.http.post(f"{method}.json", json=params)
@@ -106,8 +109,9 @@ def live_info(bx: Bitrix, task_id: str | None, deal_id: str | None) -> dict:
     if deal_id:
         try:
             d = bx.get_deal(deal_id) or {}
+            # сумму не отдаём: интерфейс её не показывает, а номер сделки в карточке может указать любой сотрудник
             out["deal"] = {"id": deal_id, "title": d.get("TITLE"), "stage": d.get("STAGE_ID"),
-                           "amount": d.get("OPPORTUNITY"), "assigned": d.get("ASSIGNED_BY_ID")}
+                           "assigned": d.get("ASSIGNED_BY_ID")}
         except BitrixError as e:
             out["deal_error"] = str(e)
     return out

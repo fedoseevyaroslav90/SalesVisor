@@ -4,8 +4,8 @@
   const fmt = iso => (iso ? iso.slice(0, 10).split('-').reverse().join('.') : '—');
   const fmtDT = iso => (iso ? new Date(iso).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' }) : '');
   const store = {
-    get: k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
-    set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* без хранилища */ } },
+    get: k => { try { return localStorage.getItem('salesvisor.' + k) || ''; } catch { return ''; } },
+    set: (k, v) => { try { localStorage.setItem('salesvisor.' + k, v); } catch { /* без хранилища */ } },
   };
   const num = (v, d = 1) => (v ? v.toLocaleString('ru-RU', { maximumFractionDigits: d, minimumFractionDigits: 0 }) : '0');
   const COLOR_NAME = { red: 'красный', yellow: 'жёлтый', green: 'зелёный' };
@@ -15,7 +15,8 @@
   async function api(url, opts) {
     const r = await fetch(url, opts);
     const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.detail || `Ошибка ${r.status}`);
+    const detail = Array.isArray(d.detail) ? d.detail.map(x => x.msg).join('; ') : d.detail;
+    if (!r.ok) throw new Error(detail || `Ошибка ${r.status}`);
     return d;
   }
 
@@ -38,6 +39,9 @@
     fill($('#manager'), state.meta.managers, store.get('manager'));
     fill($('#dept'), state.meta.depts, store.get('dept'));
     fill($('#dayLine'), state.meta.lines || [], '');
+    const loadTab = document.querySelector('.tabs button[data-tab="load"]');
+    if (loadTab) loadTab.hidden = state.meta.can_upload === false;
+    $('#portalLink').hidden = !state.meta.portal_user;  // открыт через портал «Инкаб ИИ» — ссылка назад
     if (!$('#dayDate').value) $('#dayDate').value = state.meta.today;
     const l = state.meta.last_load || {};
     $('#lastLoad').textContent = [l.segments && 'отрезки ' + fmtDT(l.segments), l.svetofor && 'светофор ' + fmtDT(l.svetofor),
@@ -92,7 +96,7 @@
       const ready = o.segments_total ? Math.round(100 * o.segments_ready / o.segments_total) : null;
       const task = [bxLink('task', o.bitrix_task), bxLink('deal', o.bitrix_deal)].filter(Boolean).join('<br>');
       return `<tr data-no="${esc(o.order_no)}">
-        <td><span class="dot ${o.color || ''}" title="${esc(COLOR_NAME[o.color] || 'нет данных светофора')}"></span></td>
+        <td><span class="dot ${COLOR_NAME[o.color] ? o.color : ''}" title="${esc(COLOR_NAME[o.color] || 'нет данных светофора')}"></span></td>
         <td><b>${esc(o.order_no)}</b>${o.comments ? ` <span class="sub" title="Комментарии">💬${o.comments}</span>` : ''}${o.overdue ? `<div class="late-tag">просрочено поз.: ${o.overdue}</div>` : ''}${o.quality ? `<div class="q-tag" title="Сообщения о качестве">несоответствий: ${o.quality}</div>` : ''}</td>
         <td>${esc(o.customer || '—')}</td>
         <td>${esc(o.sales_dept || '—')}<div class="sub">${esc(o.manager || '')}</div></td>
@@ -118,7 +122,7 @@
     if (!id) return '';
     const tpl = kind === 'task' ? state.meta.bitrix_task_url : state.meta.bitrix_deal_url;
     const label = (kind === 'task' ? 'задача ' : 'сделка ') + id;
-    return tpl ? `<a href="${esc(tpl.replace('{id}', id))}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(label)}</a>` : esc(label);
+    return /^https:\/\//i.test(tpl || '') ? `<a href="${esc(tpl.replace('{id}', id))}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(label)}</a>` : esc(label);
   }
 
   // ---------- карточка заказа ----------
@@ -129,7 +133,7 @@
     const p0 = d.positions.find(p => p.customer) || d.positions[0];
     const posRows = d.positions.map(p => `
       <tr class="pos" data-pos="${esc(p.pos)}">
-        <td><span class="dot ${p.color || ''}"></span></td>
+        <td><span class="dot ${COLOR_NAME[p.color] ? p.color : ''}"></span></td>
         <td><b>${esc(p.pos)}</b></td>
         <td>${esc(p.product || '')}</td>
         <td>${esc(p.first_decade || '—')}</td>
@@ -226,7 +230,7 @@
     $('#commentForm').addEventListener('submit', async e => {
       e.preventDefault();
       const f = e.target;
-      store.set('author', f.author.value);
+      if (!state.meta.portal_user) store.set('author', f.author.value);
       await api(`api/orders/${encodeURIComponent(no)}/comments`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: f.text.value, author: f.author.value }),

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from sqlalchemy.engine import Engine
 
 from .bitrix import Bitrix, post_decade_changes
 from .config import Settings
-from .ingest import SOURCE_ORDER, detect_source, load_file, load_plan, load_dispatcher, load_segments, load_svetofor, read_table
+from .ingest import SOURCE_ORDER, load_file, load_lock, load_plan, load_dispatcher, load_segments, load_svetofor, read_table, sniff_source
 from .metabase import Metabase
 
 log = logging.getLogger("salesvisor.sync")
@@ -20,16 +21,22 @@ class SyncError(Exception):
     pass
 
 
+# Файл моложе этого ещё может докачиваться по SFTP: обрезанный CSV с верным заголовком загрузился бы
+# как полный отчёт и стёр бы отрезки, которых в нём не оказалось
+SETTLE_SECONDS = 120
+
+
 def import_folder(engine: Engine, folder: str) -> list[dict]:
     """Загрузить новые выгрузки из папки и переложить их в done/ (или failed/, если файл не разобран)."""
     root = Path(folder)
+    now = time.time()
     files = sorted(f for f in root.iterdir() if f.is_file() and f.suffix.lower() in (".csv", ".xlsx", ".xls")
-                   and not f.name.startswith("."))
+                   and not f.name.startswith(".") and now - f.stat().st_mtime >= SETTLE_SECONDS)
     parsed = []
     for f in files:
         data = f.read_bytes()
         try:
-            source = detect_source(list(read_table(data, f.name).columns))
+            source = sniff_source(data, f.name)
         except Exception:  # битый или недокачанный файл
             source = None
         parsed.append((f, data, source))
@@ -43,22 +50,24 @@ def import_folder(engine: Engine, folder: str) -> list[dict]:
             try:
                 results.append(load_file(engine, source, data, f.name))
                 target = "done"
-            except ValueError as e:
-                log.warning("import %s: %s", f.name, e)
+            except Exception as e:  # любой сбой — в failed/, иначе файл вставал бы первым каждый час
+                log.warning("import %s: %s: %s", f.name, type(e).__name__, str(e)[:300])
         else:
-            log.warning("import %s: не похоже ни на светофор, ни на отчёт по отрезкам", f.name)
+            log.warning("import %s: не похоже ни на одну из выгрузок (отрезки, светофор, план, диспетчерский)", f.name)
         (root / target).mkdir(exist_ok=True)
         shutil.move(str(f), root / target / f"{stamp}_{f.name}")
     return results
 
 
-def run_sync(engine: Engine, settings: Settings) -> list[dict]:
-    if settings.metabase_ready:
-        results = _from_metabase(engine, settings)
-    elif settings.import_dir:
-        results = import_folder(engine, settings.import_dir)
-    else:
+def run_sync(engine: Engine, settings: Settings, wait: bool = True) -> list[dict]:
+    """wait=False — из веба: если идёт другая загрузка, сразу LoadBusy (веб отвечает 409)."""
+    if not settings.metabase_ready and not settings.import_dir:
         raise SyncError("Не настроены ни Metabase, ни папка выгрузок (IMPORT_DIR)")
+    with load_lock(engine, wait=wait):
+        if settings.metabase_ready:
+            results = _from_metabase(engine, settings)
+        else:
+            results = import_folder(engine, settings.import_dir)
     if settings.bitrix_post_comments and settings.bitrix_webhook_url:
         sent = post_decade_changes(engine, Bitrix(settings))
         results.append({"source": "bitrix", "comments_for_changes": sent})

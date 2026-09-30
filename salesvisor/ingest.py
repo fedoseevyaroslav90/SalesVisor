@@ -1,13 +1,16 @@
 """Загрузка выгрузок светофора и отчёта по отрезкам в базу с журналом изменений."""
 from __future__ import annotations
 
+import hashlib
 import io
 import re
+import threading
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import date, datetime
 
 import pandas as pd
-from sqlalchemy import bindparam, delete, insert, select, update
+from sqlalchemy import Table, bindparam, delete, insert, select, text, update
 from sqlalchemy.engine import Engine
 
 from . import parsing as p
@@ -26,6 +29,8 @@ TRACKED_SVETOFOR = ["current_decade", "color", "plan_ship_date"]
 TRACKED_SEGMENTS = ["required_date", "stage"]
 TRACKED_PLAN = ["line", "plan_end_date"]
 TRACKED_DISPATCHER = ["disp_decade", "disp_ready"]
+
+COLORS = {"red", "yellow", "green"}
 
 STAGES = [
     # (поле-счётчик, название этапа, когда все отрезки дошли до него)
@@ -108,7 +113,7 @@ def _fmt(v) -> str | None:
 
 def parse_svetofor(df: pd.DataFrame) -> list[dict]:
     _check_columns(df, SVETOFOR_REQUIRED, "Светофор")
-    rows = []
+    rows: dict[tuple[str, str], dict] = {}  # позиция дважды в выгрузке — берём последнюю строку
     for r in df.to_dict("records"):
         order_no, pos = _key(r.get("Заказ")), _key(r.get("Позиция"))
         if not order_no or not pos:
@@ -117,7 +122,8 @@ def parse_svetofor(df: pd.DataFrame) -> list[dict]:
         z4 = p.parse_date(r.get("Дата перевода Z4"))
         first, first_end = p.parse_decade(r.get("Первая декада"), near=z4 or plan)
         cur, cur_end = p.parse_decade(r.get("Текущая декада"), near=plan)
-        rows.append({
+        color = (p.text(r.get("Цвет")) or "").lower()
+        rows[(order_no, pos)] = {
             "order_no": order_no, "pos": pos,
             "customer": p.text(r.get("Заказчик")),
             "sales_dept": p.text(r.get("Отдел продаж")),
@@ -126,10 +132,10 @@ def parse_svetofor(df: pd.DataFrame) -> list[dict]:
             "first_decade": first, "first_decade_end": first_end,
             "current_decade": cur, "current_decade_end": cur_end,
             "shift_days": p.parse_int(r.get("Смещено дней")),
-            "color": (p.text(r.get("Цвет")) or "").lower() or None,
+            "color": color if color in COLORS else None,  # значение уходит в класс CSS интерфейса
             "in_svetofor": True,
-        })
-    return rows
+        }
+    return list(rows.values())
 
 
 # ---------------------------------------------------------------- отрезки
@@ -140,7 +146,7 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
     product_col = "Материал.1" if "Материал.1" in df.columns else "Материал"
     amount_col = next((c for c in df.columns if c.startswith("СУММА ЗАКАЗА, РУБ. (СУММА ВАЛ")), None)
 
-    segs: list[dict] = []
+    segs: dict[tuple[str, str, str], dict] = {}
     agg: dict[tuple[str, str], dict] = {}
     for r in df.to_dict("records"):
         order_no, pos = _key(r.get("Заказ клиента")), _key(r.get("Позиция заказа клиента"))
@@ -148,7 +154,8 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
             continue
         seg = {
             "order_no": order_no, "pos": pos,
-            "seg_no": _key(r.get("Номер отрезка по порядку в позиции")) or "1",
+            "seg_no": _key(r.get("Номер отрезка по порядку в позиции"))
+            or str(agg[(order_no, pos)]["segments_total"] + 1 if (order_no, pos) in agg else 1),
             "length": p.parse_number(r.get("Длина отдельного отрезка")),
             "unit": p.text(r.get("ЕИ")),
             "fact_length": p.parse_number(r.get("Фактическая длина")),
@@ -162,7 +169,7 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
             "prod_order": _key(r.get("Заказ на производство")),
             "warehouse": p.text(r.get("Наименование склада отгрузки")),
         }
-        segs.append(seg)
+        segs[(order_no, pos, seg["seg_no"])] = seg
 
         a = agg.get((order_no, pos))
         if a is None:
@@ -198,7 +205,7 @@ def parse_segments(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
         a["stage"] = stage_of(a)
         total = a["segments_total"]
         a["closed"] = total > 0 and (a["segments_shipped"] == total or a["segments_invoiced"] == total)
-    return segs, list(agg.values())
+    return list(segs.values()), list(agg.values())
 
 
 def stage_of(a: dict) -> str:
@@ -262,7 +269,7 @@ def parse_plan(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
         msg_text = p.text(_get(r, cols, "описание сообщения по качеству"))
         if msg_no or msg_text:
             a["plan_msg"] = a["plan_msg"] or (msg_text or f"сообщение {msg_no}")[:200]
-            key = msg_no or f"{order_no}-{pos}-{msg_text}"[:20]
+            key = msg_no or "h" + hashlib.md5(f"{order_no}|{pos}|{msg_text}".encode()).hexdigest()[:19]
             msgs[key] = {"msg_no": key, "order_no": order_no, "pos": pos, "line": line, "text": (msg_text or "")[:300] or None,
                          "product": p.text(_get(r, cols, "наименование материала гп", "наименование материала поступления")),
                          "plan_end_date": end_d}
@@ -359,6 +366,60 @@ def parse_dispatcher_end_dates(df: pd.DataFrame) -> list[dict]:
 
 # ---------------------------------------------------------------- запись в базу
 
+_LENGTHS: dict[str, dict[str, int]] = {}
+
+
+def _fit(table: Table, rows: list[dict]) -> list[dict]:
+    """Строки не длиннее колонки. На PostgreSQL слишком длинное значение роняет всю загрузку
+    (StringDataRightTruncation), на SQLite длина не проверяется — поэтому обрезаем до записи и до сравнения."""
+    lengths = _LENGTHS.get(table.name)
+    if lengths is None:
+        lengths = _LENGTHS[table.name] = {c.name: c.type.length for c in table.columns
+                                          if getattr(c.type, "length", None)}
+    for r in rows:
+        for k, n in lengths.items():
+            v = r.get(k)
+            if isinstance(v, str) and len(v) > n:
+                r[k] = v[:n]
+    return rows
+
+
+# Одна загрузка за раз: веб (ручная загрузка, «Обновить сейчас») и контейнер синхронизации пишут в одну базу.
+# Две загрузки отрезков подряд давали дубль ключа (DELETE второй ждёт первую и не видит её строк),
+# светофор вместе с отрезками — взаимоблокировку. На PostgreSQL — рекомендательная блокировка на сеанс,
+# на SQLite (локально, один процесс) — блокировка потока.
+_LOCK_KEY = 5_417_320_930
+_local_lock = threading.Lock()
+
+
+class LoadBusy(RuntimeError):
+    pass
+
+
+@contextmanager
+def load_lock(engine: Engine, wait: bool = True):
+    if engine.dialect.name != "postgresql":
+        if not _local_lock.acquire(blocking=wait):
+            raise LoadBusy("Идёт другая загрузка — повторите через минуту")
+        try:
+            yield
+        finally:
+            _local_lock.release()
+        return
+    with engine.connect() as conn:
+        if wait:
+            conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _LOCK_KEY})
+        elif not conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": _LOCK_KEY}).scalar():
+            conn.rollback()
+            raise LoadBusy("Идёт другая загрузка — повторите через минуту")
+        conn.commit()  # блокировка сеансовая: переживает конец транзакции, соединение не висит «в транзакции»
+        try:
+            yield
+        finally:
+            conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _LOCK_KEY})
+            conn.commit()
+
+
 def _load_existing(conn, keys: set[tuple[str, str]], fields: list[str]) -> dict:
     cols = [positions.c.order_no, positions.c.pos] + [positions.c[f] for f in fields]
     out = {}
@@ -370,6 +431,7 @@ def _load_existing(conn, keys: set[tuple[str, str]], fields: list[str]) -> dict:
 
 
 def _upsert(conn, rows: list[dict], tracked: list[str], snapshot_id: int) -> dict:
+    rows = _fit(positions, [dict(r) for r in rows])
     keys = {(r["order_no"], r["pos"]) for r in rows}
     existing = _load_existing(conn, keys, tracked)
     now = datetime.now()
@@ -398,12 +460,12 @@ def _upsert(conn, rows: list[dict], tracked: list[str], snapshot_id: int) -> dic
                 .values({f: bindparam(f) for f in fields}))
         conn.execute(stmt, [{"k_order": r["order_no"], "k_pos": r["pos"], **{f: r.get(f) for f in fields}} for r in to_update])
     if changes:
-        conn.execute(insert(change_log), changes)
+        conn.execute(insert(change_log), _fit(change_log, changes))
     return {"new": len(to_insert), "updated": len(to_update), "changes": len(changes)}
 
 
 def _snapshot(conn, source: str, origin: str, rows: int) -> int:
-    res = conn.execute(insert(snapshots).values(source=source, origin=origin, rows=rows, loaded_at=datetime.now()))
+    res = conn.execute(insert(snapshots).values(source=source, origin=(origin or "")[:200], rows=rows, loaded_at=datetime.now()))
     return res.inserted_primary_key[0]
 
 
@@ -420,6 +482,7 @@ def load_svetofor(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
 
 def load_segments(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
     segs, pos_rows = parse_segments(df)
+    segs = _fit(segments, segs)
     with engine.begin() as conn:
         sid = _snapshot(conn, "segments", origin, len(df))
         conn.execute(delete(segments))
@@ -444,6 +507,7 @@ def load_plan(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
 
 
 def _save_quality(conn, msgs: list[dict], snapshot_id: int) -> int:
+    msgs = _fit(quality_msgs, msgs)
     have = {r[0] for r in conn.execute(select(quality_msgs.c.msg_no))}
     new = [m for m in msgs if m["msg_no"] not in have]
     now = datetime.now()
@@ -455,16 +519,17 @@ def _save_quality(conn, msgs: list[dict], snapshot_id: int) -> int:
                 "new": (f"{m['text'] or 'без описания'} ({m['line'] or 'линия ?'})")[:100], "snapshot_id": snapshot_id, "at": now}
                for m in new if (m["order_no"], m["pos"]) in known]
         if log:
-            conn.execute(insert(change_log), log)
-    for m in msgs:
-        if m["msg_no"] in have:
-            conn.execute(update(quality_msgs).where(quality_msgs.c.msg_no == m["msg_no"])
-                         .values(text=m["text"], line=m["line"], plan_end_date=m["plan_end_date"]))
+            conn.execute(insert(change_log), _fit(change_log, log))
+    old = [{"k_msg": m["msg_no"], "text": m["text"], "line": m["line"], "plan_end_date": m["plan_end_date"]}
+           for m in msgs if m["msg_no"] in have]
+    if old:
+        conn.execute(update(quality_msgs).where(quality_msgs.c.msg_no == bindparam("k_msg"))
+                     .values(text=bindparam("text"), line=bindparam("line"), plan_end_date=bindparam("plan_end_date")), old)
     return len(new)
 
 
 def load_dispatcher(engine: Engine, df: pd.DataFrame, origin: str, end_dates: pd.DataFrame | None = None) -> dict:
-    rows = parse_dispatcher(df)
+    rows = _fit(dispatcher, parse_dispatcher(df))
     with engine.begin() as conn:
         sid = _snapshot(conn, "dispatcher", origin, len(df))
         conn.execute(delete(dispatcher))
@@ -509,6 +574,19 @@ def _fill_order_managers(conn) -> None:
                 .where(positions.c.order_no == bindparam("k_order"), positions.c.pos == bindparam("k_pos"))
                 .values(manager=bindparam("manager")))
         conn.execute(stmt, params)
+
+
+def sniff_source(data: bytes, filename: str) -> str | None:
+    """Тип выгрузки по заголовкам — без разбора всей таблицы (CSV отчёта по отрезкам — десятки мегабайт)."""
+    if filename.lower().endswith((".xlsx", ".xlsm")):
+        for _title, headers in _sheet_headers(data):
+            src = detect_source([str(h).strip() for h in headers])
+            if src:
+                return src
+        return None
+    head = _decode(data[:256 * 1024].split(b"\n", 1)[0])
+    df = pd.read_csv(io.StringIO(head), dtype=str, sep=None, engine="python")
+    return detect_source([str(c).strip() for c in df.columns])
 
 
 def load_file(engine: Engine, source: str, data: bytes, filename: str) -> dict:
