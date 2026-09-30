@@ -152,6 +152,10 @@
           <option value="ship">Только отгрузку</option>
         </select></label>
         <label class="check"><input id="dayBacklog" type="checkbox"> и невыполненное за прошлые дни</label>
+        <label title="Календарные — как в документе передачи. Производственные — с 08:00 до 08:00: окончание до 08:00 относится к предыдущим суткам">Сутки <select id="dayShift">
+          <option value="">календарные</option>
+          <option value="1">производственные, с 08:00</option>
+        </select></label>
         <input id="daySearch" type="search" placeholder="Заказ, клиент, изделие">
         <span class="toolbar-end"><button class="btn secondary" id="dayExport" title="Строки на экране — в CSV для Excel">Скачать</button></span>
       </div>

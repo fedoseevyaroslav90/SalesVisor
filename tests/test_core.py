@@ -453,7 +453,7 @@ def test_stats_otd_by_first_date():
 
 
 def test_production_day_starts_at_8():
-    """Производственные сутки 08:00→08:00: окончание 03.10 в 05:40 — это сутки 02.10."""
+    """Сутки: календарные по умолчанию; производственные 08:00→08:00 — окончание 03.10 в 05:40 относится к 02.10."""
     from salesvisor.ingest import load_plan
     from salesvisor.queries import day_plan, prod_day
 
@@ -466,8 +466,12 @@ def test_production_day_starts_at_8():
         {"Заказ клиента": "1200000091", "Позиция заказа": "20", "Рабочее место": "SZ-2", "Дата конца": "03.10.2026", "Время конца": "09:15", "Номер ДСЕ": "B"},
     ]), "plan.xlsx")
     today = date(2026, 10, 1)
-    assert [r["pos"] for r in day_plan(engine, date(2026, 10, 2), today=today)["positions"] if r["task_make"]] == ["10"]
-    assert [r["pos"] for r in day_plan(engine, date(2026, 10, 3), today=today)["positions"] if r["task_make"]] == ["20"]
+    make = lambda d, **kw: [r["pos"] for r in day_plan(engine, d, today=today, **kw)["positions"] if r["task_make"]]
+    # по умолчанию — календарные сутки, как в версии передачи и её контрольных цифрах
+    assert make(date(2026, 10, 3)) == ["10", "20"] and make(date(2026, 10, 2)) == []
+    # производственные сутки с 08:00 — по выбору
+    assert make(date(2026, 10, 2), shift_day=True) == ["10"]
+    assert make(date(2026, 10, 3), shift_day=True) == ["20"]
 
 
 def test_feed_events_z6_control_and_late30():

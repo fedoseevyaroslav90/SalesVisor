@@ -189,7 +189,7 @@ class Filters:
             if ((p.get("reject_code") or "-").upper() in codes) == self.reject.startswith("!"):
                 return False
         f = self.flags
-        return not (("overdue" in f and not p["overdue"]) or ("quality" in f and not p["quality"])
+        return not (("overdue" in f and not p["overdue"]) or ("quality" in f and not p["quality_order"])
                     or ("nolink" in f and (p["bitrix_task"] or p["bitrix_deal"])) or ("comments" in f and not p["comments"])
                     or ("noline" in f and p.get("line")) or ("plan" in f and not p.get("line"))
                     or ("goz" in f and not _GOZ.match(p.get("product") or ""))
@@ -215,6 +215,8 @@ def _filtered_positions(engine: Engine, scope: str, manager: str, dept: str, f: 
         link = links.get(p["order_no"])
         p["segments_ready"] = (p.get("segments_ready") or 0) + (p.get("segments_shipped") or 0)
         p["quality"] = n_quality.get((p["order_no"], p["pos"]), 0)
+        # у заказа — все его сообщения, в том числе по отгруженным позициям (как в версии передачи)
+        p["quality_order"] = n_quality.get(p["order_no"], 0)
         p["comments"] = n_comments.get(p["order_no"], 0)
         p["bitrix_task"] = link.task_id if link is not None and link.task_id else p.get("bitrix_task")
         p["bitrix_deal"] = link.deal_id if link is not None else None
@@ -308,7 +310,7 @@ def list_orders(engine: Engine, *, scope: str = "open", manager: str = "", dept:
             "days_late": max(p["days_late"] for p in ps),
             "ready_positions": sum(1 for p in ps if (p.get("segments_total") or 0) and p["segments_ready"] >= p["segments_total"]),
             "comments": first["comments"],
-            "quality": sum(p["quality"] for p in ps),
+            "quality": first["quality_order"],
             "lines": sorted({p["line"] for p in ps if p.get("line")}),
             "stages": sorted({p["stage"] for p in ps if p.get("stage")}),
         }
@@ -453,10 +455,11 @@ def prod_day(end_date: str | None, end_time: str | None) -> str | None:
 
 
 def day_plan(engine: Engine, day: date, *, manager: str = "", dept: str = "", line: str = "",
-             with_backlog: bool = False, today: date | None = None) -> dict:
+             with_backlog: bool = False, shift_day: bool = False, today: date | None = None) -> dict:
     """Что по плану должно случиться в этот день: окончание производства (план производства, линия)
     и отгрузка (план отгрузки светофора, иначе план дата отгрузки фактуры из отчёта по отрезкам).
-    С with_backlog добавляются невыполненные позиции с плановой датой раньше дня."""
+    С with_backlog добавляются невыполненные позиции с плановой датой раньше дня. Сутки — календарные (как в передаче
+    и контрольных цифрах); shift_day=True — производственные 08:00 → 08:00 (окончание до 08:00 — предыдущие сутки)."""
     today = today or date.today()
     ship_col = positions.c.plan_ship_date
     inv_col = positions.c.invoice_plan_date
@@ -482,7 +485,7 @@ def day_plan(engine: Engine, day: date, *, manager: str = "", dept: str = "", li
     for r in rows:
         r["quality"] = qmap.get((r["order_no"], r["pos"]), [])
         ship_plan = r.get("plan_ship_date") or r.get("invoice_plan_date")
-        r["prod_day"] = pday = prod_day(r.get("plan_end_date"), r.get("plan_end_time"))
+        r["prod_day"] = pday = prod_day(r.get("plan_end_date"), r.get("plan_end_time")) if shift_day else r.get("plan_end_date")
         make = bool(pday) and (pday <= day.isoformat() if with_backlog else pday == day.isoformat())
         ship = bool(ship_plan) and (ship_plan <= day.isoformat() if with_backlog else ship_plan == day.isoformat())
         make_done, ship_done = _produced(r), _shipped(r)

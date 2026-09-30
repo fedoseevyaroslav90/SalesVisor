@@ -244,13 +244,13 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
             bx.close()
 
     @app.get("/api/day")
-    def api_day(date: str = "", manager: str = "", dept: str = "", line: str = "", backlog: bool = False):
+    def api_day(date: str = "", manager: str = "", dept: str = "", line: str = "", backlog: bool = False, shift: bool = False):
         from datetime import date as _date
         try:
             day = _date.fromisoformat(date) if date else _date.today()
         except ValueError as e:
             raise HTTPException(400, "Дата в формате ГГГГ-ММ-ДД") from e
-        return queries.day_plan(engine, day, manager=manager, dept=dept, line=line, with_backlog=backlog)
+        return queries.day_plan(engine, day, manager=manager, dept=dept, line=line, with_backlog=backlog, shift_day=shift)
 
     @app.get("/api/dispatcher")
     def api_dispatcher(decade: str = "", manager: str = "", dept: str = ""):

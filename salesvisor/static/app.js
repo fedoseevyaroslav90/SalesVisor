@@ -795,7 +795,7 @@
   async function loadDay() {
     const qs = new URLSearchParams({
       date: $('#dayDate').value || state.meta.today || '',
-      manager: $('#manager').value, dept: $('#dept').value, backlog: $('#dayBacklog').checked,
+      manager: $('#manager').value, dept: $('#dept').value, backlog: $('#dayBacklog').checked, shift: !!$('#dayShift').value,
     });
     state.day = await api('api/day?' + qs);
     renderDay();
@@ -810,7 +810,9 @@
     const d = state.day, what = $('#dayWhat').value, lineSel = $('#dayLine').value || state.dayLine;
     const s = d.summary;
     const hasPlan = (state.meta.lines || []).length > 0;
-    $('#dayNote').textContent = (hasPlan ? 'Произвести — по ZPP context (линия, плановое окончание); сделано, если все отрезки произведены или факт MES дошёл до плана. Производственные сутки — с 08:00 до 08:00: окончание до 08:00 относится к предыдущим суткам. Отгрузить — по плану отгрузки. '
+    $('#dayNote').textContent = (hasPlan ? 'Произвести — по ZPP context (линия, плановое окончание); сделано, если все отрезки произведены или факт MES дошёл до плана. '
+      + ($('#dayShift').value ? 'Сутки производственные — с 08:00 до 08:00: окончание до 08:00 относится к предыдущим суткам. ' : 'Сутки календарные. ')
+      + 'Отгрузить — по плану отгрузки. '
       : 'План производства ещё не загружен: линии и плановое окончание появятся после загрузки ZPP context. Пока показан план отгрузки. ')
       + `Для менеджера и отдела действуют фильтры с вкладки «Заказы».`;
     const tiles = [
@@ -855,7 +857,8 @@
     }).join('');
     document.querySelectorAll('#dayTable tbody tr[data-no]').forEach(tr => tr.addEventListener('click', () => openOrder(tr.dataset.no)));
   }
-  ['#dayDate', '#dayBacklog'].forEach(id => $(id).addEventListener('change', () => loadDay().catch(showDayErr)));
+  ['#dayDate', '#dayBacklog', '#dayShift'].forEach(id => $(id).addEventListener('change', () => { if (id === '#dayShift') store.set('dayShift', $(id).value); loadDay().catch(showDayErr); }));
+  $('#dayShift').value = store.get('dayShift');
   $('#dayLine').addEventListener('change', () => { state.dayLine = ''; renderDay(); });
   $('#dayWhat').addEventListener('change', renderDay);
   $('#daySearch').addEventListener('input', renderDay);

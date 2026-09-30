@@ -69,7 +69,7 @@ positions = Table(
     Column("plan_lines", String(200)),    # все линии позиции через запятую
     Column("plan_end_date", Date),
     Column("plan_end_time", String(5)),
-    Column("dse", String(40)),
+    Column("dse", String(400)),           # в ZPP номер ДСЕ бывает списком через запятую
     Column("plan_msg", String(200)),
     Column("plan_qty", Float),            # Кол-во поступления (план) по ZPP context
     Column("plan_fact_qty", Float),       # Кол-во поступления (факт) MES
@@ -146,7 +146,7 @@ plan_rows = Table(
     Column("plan_lines", String(200)),
     Column("plan_end_date", Date),
     Column("plan_end_time", String(5)),
-    Column("dse", String(40)),
+    Column("dse", String(400)),
     Column("plan_msg", String(200)),
     Column("plan_qty", Float),
     Column("plan_fact_qty", Float),
@@ -237,11 +237,16 @@ _SCHEMA_LOCK_KEY = 5_417_320_931
 
 
 def _add_missing_columns(engine: Engine) -> None:
-    """Базы, созданные прежней версией, получают новые колонки без потери данных."""
+    """Базы, созданные прежней версией, получают новые колонки без потери данных, а на PostgreSQL — и более
+    длинные строковые колонки, если в схеме их расширили (на SQLite длина не проверяется)."""
     insp = inspect(engine)
     with engine.begin() as conn:
         for table in metadata.sorted_tables:
-            have = {c["name"] for c in insp.get_columns(table.name)}
+            have = {c["name"]: c for c in insp.get_columns(table.name)}
             for c in table.columns:
                 if c.name not in have:
                     conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {c.name} {c.type.compile(engine.dialect)}'))
+                    continue
+                want, got = getattr(c.type, "length", None), getattr(have[c.name]["type"], "length", None)
+                if engine.dialect.name == "postgresql" and want and got and got < want:
+                    conn.execute(text(f'ALTER TABLE {table.name} ALTER COLUMN {c.name} TYPE VARCHAR({want})'))

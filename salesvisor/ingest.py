@@ -452,10 +452,10 @@ def _load_existing(conn, keys: set[tuple[str, str]], fields: list[str]) -> dict:
 
 
 def _upsert(conn, rows: list[dict], tracked: list[str], snapshot_id: int, log_new: bool = False) -> dict:
-    """log_new — записать в журнал появление новых позиций (отрезки и светофор; не при самой первой загрузке)."""
+    """log_new — записать в журнал появление новых позиций (решает вызывающий: только отчёт по отрезкам и
+    не при первой его загрузке — иначе весь портфель и позиции «только из светофора» станут «новыми»)."""
     rows = _fit(positions, [dict(r) for r in rows])
     keys = {(r["order_no"], r["pos"]) for r in rows}
-    log_new = log_new and conn.execute(select(func.count()).select_from(positions)).scalar() > 0
     existing = _load_existing(conn, keys, tracked)
     now = datetime.now()
     to_insert, to_update, changes = [], [], []
@@ -504,7 +504,7 @@ def load_svetofor(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
         sid = _snapshot(conn, "svetofor", origin, len(df))
         # Позиции, которых нет в свежем светофоре, помечаем, но не удаляем
         conn.execute(update(positions).values(in_svetofor=False))
-        stats = _upsert(conn, rows, TRACKED_SVETOFOR, sid, log_new=True)
+        stats = _upsert(conn, rows, TRACKED_SVETOFOR, sid)
         _fill_order_managers(conn)
         deferred = _apply_deferred(conn, sid)
     return {"source": "svetofor", "rows": len(df), "positions": len(rows), "deferred_applied": deferred, **stats}
@@ -514,11 +514,12 @@ def load_segments(engine: Engine, df: pd.DataFrame, origin: str) -> dict:
     segs, pos_rows = parse_segments(df)
     segs = _fit(segments, segs)
     with engine.begin() as conn:
+        had_segments = conn.execute(select(func.count()).select_from(snapshots).where(snapshots.c.source == "segments")).scalar() > 0
         sid = _snapshot(conn, "segments", origin, len(df))
         conn.execute(delete(segments))
         for i in range(0, len(segs), 5000):
             conn.execute(insert(segments), segs[i:i + 5000])
-        stats = _upsert(conn, pos_rows, TRACKED_SEGMENTS, sid, log_new=True)
+        stats = _upsert(conn, pos_rows, TRACKED_SEGMENTS, sid, log_new=had_segments)
         _fill_order_managers(conn)
         deferred = _apply_deferred(conn, sid)
     return {"source": "segments", "rows": len(df), "positions": len(pos_rows), "deferred_applied": deferred, **stats}
