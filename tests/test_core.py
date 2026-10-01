@@ -390,6 +390,24 @@ def test_multi_value_filters():
     assert day_plan(engine, date(2026, 10, 3), manager="IVANOVA|SIDOROVA", today=today)["summary"]["positions"] == 0
 
 
+def test_hide_stages():
+    """Менеджер убирает с экрана ушедшее: в пути, отфактуровано; «Отфактуровано» — отдельно от «Отгружено»."""
+    from salesvisor.queries import Filters, list_positions
+
+    engine = make_engine("sqlite:///:memory:")
+    load_segments(engine, pd.DataFrame([
+        seg_row("1200000071", "10", "1", "3 октября, 2026"),
+        seg_row("1200000072", "10", "1", "3 октября, 2026", produced="@08@", transit="@08@"),
+        seg_row("1200000073", "10", "1", "3 октября, 2026", produced="@08@", shipped="@08@"),
+        seg_row("1200000074", "10", "1", "3 октября, 2026", produced="@08@", shipped="@08@", invoiced="@08@"),
+    ]), "d1")
+    nums = lambda **kw: sorted(p["order_no"] for p in list_positions(
+        engine, scope="all", filters=Filters.from_query(**kw), today=date(2026, 9, 30))["rows"])
+    assert nums(hide_stage="transit,invoiced") == ["1200000071", "1200000073"]
+    assert nums(stage="invoiced") == ["1200000074"]
+    assert nums(stage="shipped") == ["1200000073"]
+
+
 def test_user_prefs_per_portal_user():
     """Преднастройки хранятся за сотрудником портала: у каждого свои, чужие не видны."""
     engine = make_engine("sqlite:///:memory:")

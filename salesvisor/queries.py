@@ -140,9 +140,10 @@ def _load_positions(engine: Engine, scope: str, manager: str, dept: str, today: 
 
 # Группы этапов для отбора: сам этап у позиции — строка вроде «В производстве 3/5»
 STAGE_GROUPS = {"not_made": "Не произведено", "in_prod": "В производстве", "made": "Произведено", "stock": "На складе",
-                "ready": "Готово к отгрузке", "transit": "В пути", "shipped": "Отгружено", "none": "Нет в отчёте по отрезкам"}
+                "ready": "Готово к отгрузке", "transit": "В пути", "shipped": "Отгружено", "invoiced": "Отфактуровано",
+                "none": "Нет в отчёте по отрезкам"}
 _STAGE_OF = {"не произведён": "not_made", "произведён": "made", "на складе": "stock", "готов к отгрузке": "ready",
-             "в пути": "transit", "отгружен": "shipped", "отфактурирован": "shipped"}
+             "в пути": "transit", "отгружен": "shipped", "отфактурирован": "invoiced"}
 
 
 def stage_group(stage: str | None) -> str:
@@ -174,6 +175,7 @@ class Filters:
     customer: str = ""            # клиент — подстрока
     line: str = ""                # линия (рабочее место); «-» — без линии
     stage: str = ""               # группа этапа, см. STAGE_GROUPS; несколько — через запятую
+    hide_stage: str = ""          # скрыть позиции с этими группами этапов (менеджер убирает ушедшее: в пути, отфактуровано…)
     color: str = ""               # red | yellow | green | none; несколько — через запятую
     due_from: date | None = None  # срок сейчас (текущая декада светофора, иначе треб. дата) — с
     due_to: date | None = None    # — по
@@ -191,6 +193,7 @@ class Filters:
         return cls(q=(kw.get("q") or "").strip().lower(), order=(kw.get("order") or "").strip(),
                    customer=(kw.get("customer") or "").strip().lower(),
                    line=(kw.get("line") or "").strip(), stage=(kw.get("stage") or "").strip(),
+                   hide_stage=(kw.get("hide_stage") or "").strip(),
                    color=(kw.get("color") or "").strip(),
                    due_from=_date(kw.get("due_from")), due_to=_date(kw.get("due_to")),
                    first_from=_date(kw.get("first_from")), first_to=_date(kw.get("first_to")),
@@ -209,6 +212,8 @@ class Filters:
         if self.line and (p.get("line") or "-") not in vals(self.line):
             return False
         if self.stage and stage_group(p.get("stage")) not in vals(self.stage, codes=True):
+            return False
+        if self.hide_stage and stage_group(p.get("stage")) in vals(self.hide_stage, codes=True):
             return False
         if self.color and (p.get("color") or "none") not in self.color.split(","):
             return False

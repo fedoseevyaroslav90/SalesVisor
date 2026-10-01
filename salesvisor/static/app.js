@@ -79,9 +79,10 @@
   document.querySelectorAll('input[data-multi]').forEach(multiSelect);
   const refreshMulti = () => Object.values(MS).forEach(m => m.refresh());
   const STAGE_OPTIONS = [['not_made', 'Не произведено'], ['in_prod', 'В производстве'], ['made', 'Произведено'], ['stock', 'На складе'],
-    ['ready', 'Готово к отгрузке'], ['transit', 'В пути'], ['shipped', 'Отгружено'], ['none', 'Нет в отчёте по отрезкам']]
+    ['ready', 'Готово к отгрузке'], ['transit', 'В пути'], ['shipped', 'Отгружено'], ['invoiced', 'Отфактуровано'], ['none', 'Нет в отчёте по отрезкам']]
     .map(([value, label]) => ({ value, label }));
   MS.fStage.setOptions(STAGE_OPTIONS);
+  MS.fHideStage.setOptions(STAGE_OPTIONS);
 
   // ---------- вкладки ----------
   document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
@@ -186,6 +187,7 @@
     if (v('#fCustomer')) p.customer = v('#fCustomer');
     if (v('#fLine')) p.line = v('#fLine');
     if (v('#fStage')) p.stage = v('#fStage');
+    if (v('#fHideStage')) p.hide_stage = v('#fHideStage');
     for (const [sel, , from, to, key] of PERIODS) {
       const code = $(sel).value, r = code === 'custom' ? [v(from), v(to)] : code ? periodRange(code) : null;
       if (r && r[0]) p[key + '_from'] = r[0];
@@ -203,7 +205,7 @@
     const text = sel => { const el = $(sel); return el.tagName === 'SELECT' ? el.options[el.selectedIndex]?.text : el.value.split('|').join(', '); };
     const parts = [state.view === 'orders' ? 'Заказы' : 'Позиции', text('#scope')];
     for (const [sel, name] of [['#manager', 'менеджер'], ['#dept', 'отдел'], ['#search', 'поиск'], ['#fCustomer', 'клиент'],
-      ['#fLine', 'линия'], ['#fStage', 'этап'], ['#fShift', 'смещение от, дн.'], ['#fReject', 'причина откл.'], ['#fGroup', 'группа']]) if ($(sel).value) parts.push(`${name}: ${text(sel)}`);
+      ['#fLine', 'линия'], ['#fStage', 'этап'], ['#fHideStage', 'скрыть этапы'], ['#fShift', 'смещение от, дн.'], ['#fReject', 'причина откл.'], ['#fGroup', 'группа']]) if ($(sel).value) parts.push(`${name}: ${text(sel)}`);
     const p = filterParams();
     if (p.due_from || p.due_to) parts.push(`срок: ${p.due_from ? fmt(p.due_from) : '…'}–${p.due_to ? fmt(p.due_to) : '…'}`);
     if (p.first_from || p.first_to) parts.push(`первая дата: ${p.first_from ? fmt(p.first_from) : '…'}–${p.first_to ? fmt(p.first_to) : '…'}`);
@@ -217,7 +219,7 @@
   // Не во фрагменте #…: заставка входа портала перезагружает страницу переходом на тот же адрес, а переход,
   // отличающийся только фрагментом, браузер страницей не перезагружает — открывший ссылку без сеанса завис бы.
   const URL_FIELDS = { scope: '#scope', manager: '#manager', dept: '#dept', q: '#search', customer: '#fCustomer', line: '#fLine',
-    stage: '#fStage', due: '#fDue', due_from: '#fDueFrom', due_to: '#fDueTo', first: '#fFirst', first_from: '#fFirstFrom',
+    stage: '#fStage', hide_stage: '#fHideStage', due: '#fDue', due_from: '#fDueFrom', due_to: '#fDueTo', first: '#fFirst', first_from: '#fFirstFrom',
     first_to: '#fFirstTo', shift: '#fShift', reject: '#fReject', group: '#fGroup' };
   function saveUrl() {
     const h = new URLSearchParams();

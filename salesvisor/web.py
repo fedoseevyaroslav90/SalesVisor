@@ -31,7 +31,7 @@ STATIC = Path(__file__).parent / "static"
 # Предел загружаемой выгрузки: CSV отчёта по отрезкам — около 70 МБ, xlsx того же отчёта — около 30 МБ
 MAX_UPLOAD_MB = 150
 # Поля отбора в строке запроса /api/orders, /api/positions, /api/export.xlsx (см. queries.Filters)
-FILTER_KEYS = ("q", "order", "customer", "line", "stage", "due_from", "due_to", "first_from", "first_to", "shift_min", "reject", "group",
+FILTER_KEYS = ("q", "order", "customer", "line", "stage", "hide_stage", "due_from", "due_to", "first_from", "first_to", "shift_min", "reject", "group",
                "flags")
 
 
