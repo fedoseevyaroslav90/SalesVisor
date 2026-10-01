@@ -89,6 +89,7 @@
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
     if (b.dataset.tab === 'changes') loadChanges();
     if (b.dataset.tab === 'pulse') loadPulse().catch(err => { $('#pulseEmpty').hidden = false; $('#pulseEmpty').textContent = 'Не удалось загрузить: ' + err.message; });
+    if (b.dataset.tab === 'capacity') loadCapacity().catch(err => { $('#capEmpty').hidden = false; $('#capEmpty').textContent = 'Не удалось загрузить: ' + err.message; });
     if (b.dataset.tab === 'stats') loadStats().catch(err => { $('#statsEmpty').hidden = false; $('#statsEmpty').textContent = 'Не удалось посчитать: ' + err.message; });
     if (b.dataset.tab === 'day') loadDay().catch(showDayErr);
     if (b.dataset.tab === 'disp') loadDisp().catch(err => { $('#dispEmpty').hidden = false; $('#dispEmpty').textContent = 'Не удалось загрузить: ' + err.message; });
@@ -672,12 +673,14 @@
     const t = [];
     if (p.pdo_rejected) t.push(`<span class="late-tag" title="${esc([p.pdo_last_reason, p.pdo_last_bottleneck].filter(Boolean).join(' · ') || 'причина не указана')}">не принят ПДО ${p.pdo_last_decade ? fmt(p.pdo_last_decade) : ''}</span>`);
     if (p.deficit_real && !p.closed) t.push(`<span class="q-tag" title="${esc(p.deficit_materials || '')}">ждём материал${p.deficit_eta ? ' до ' + fmt(p.deficit_eta) : ''}</span>`);
-    if (p.overload) t.push(`<span class="late-tag" title="${esc(p.wc_group || '')}">${esc(p.pdo_last_wc || 'передел')} ${Math.round(p.wc_load)} %</span>`);
+    if (p.overload && p.wc_load > 100) t.push(`<span class="late-tag" title="${esc(p.wc_group || '')}">${esc(p.pdo_last_wc || 'передел')} ${Math.round(p.wc_load)} %</span>`);
+    else if (p.overload && p.route_load > 100) t.push(`<span class="late-tag" title="${esc('Маршрут: ' + (p.route || '') + (p.plan_decade ? ' · декада ' + fmt(p.plan_decade) : ''))}">${esc(shortGrp(p.route_bottleneck))} ${Math.round(p.route_load)} %${p.route_kind === 'прогноз' ? ' (прогноз)' : ''}</span>`);
     return t.length ? `<div class="path-tags">${t.join(' ')}</div>` : '';
   }
   const loadCls = v => (v == null ? '' : v > 100 ? 'neg' : v >= 90 ? 'warn-cell' : '');
+  const shortGrp = g => String(g || 'передел').split('. ').slice(-1)[0].toLowerCase();
   function pathSection(ps) {
-    const withPath = ps.filter(p => p.path && (p.path.plan.length || p.path.fact.length || p.path.deficits.length));
+    const withPath = ps.filter(p => p.path && (p.path.plan.length || p.path.fact.length || p.path.deficits.length || (p.path.capacity || []).length));
     if (!withPath.length) return '<h3>Путь в производстве</h3><p class="muted">По позициям заказа нет решений ПДО и дефицитов в загруженных отчётах.</p>';
     const plan = withPath.map(p => {
       const facts = Object.fromEntries(p.path.fact.map(f => [f.decade, f]));
@@ -702,6 +705,11 @@
           <td>${x.eta ? fmt(x.eta) : 'даты нет'}${x.eta_changes ? `<div class="sub">менялась ${x.eta_changes} раз, первая — ${fmt(x.eta_first)}</div>` : ''}</td>
           <td class="d">${x.req_date ? fmt(x.req_date) : '—'}</td>
           <td class="d">${fmt(x.first_seen)}</td></tr>`).join('')).join('');
+    const caps = withPath.map(p => (p.path.capacity || []).map(c => `<tr><td>${esc(p.pos)}</td><td class="d">${fmt(c.decade)}</td>
+          <td>${esc(c.short)}</td><td>${esc(c.place || '')}</td><td class="num">${num(c.km, 3)}</td><td class="num">${num(c.share, 2)}</td>
+          <td class="num ${loadCls(c.value)}">${c.value == null ? '—' : c.value + ' %'}${c.kind !== 'сейчас' ? `<div class="sub">${c.kind}${c.now != null ? ', в снимке ' + c.now + ' %' : ''}</div>` : ''}</td>
+          <td class="num">${kRub(c.vp)}</td></tr>`).join('')).join('');
+    const capSnap = (withPath.flatMap(p => p.path.capacity || [])[0] || {}).snapshot;
     return `<h3>Путь в производстве</h3>
       <p class="sub">Решения ПДО по декадам (последняя версия отчёта «принято / не принято»), итог декады и загрузка рабочего места.</p>
       ${plan ? `<div class="table-wrap"><table class="mini">
@@ -710,7 +718,12 @@
       ${defs ? `<h4>Материалы</h4><p class="sub">Дефициты по отчётам снабжения (Z0+Z4): что ждём, когда обещана поставка и сколько раз дата сдвигалась.</p>
         <div class="table-wrap"><table class="mini">
         <thead><tr><th>Поз.</th><th>Материал</th><th>Состояние</th><th>Поставка</th><th>Нужен к</th><th>В дефиците с</th></tr></thead>
-        <tbody>${defs}</tbody></table></div>` : ''}`;
+        <tbody>${defs}</tbody></table></div>` : ''}
+      ${caps ? `<h4>Мощности</h4><p class="sub">Через какие переделы идёт позиция в декаде твёрдого плана («Сводный» от ${fmt(capSnap)}),
+        какую долю их мощности занимает и как передел загружен — по последнему снимку или по прогнозу к началу декады.</p>
+        <div class="table-wrap"><table class="mini">
+        <thead><tr><th>Поз.</th><th>Декада</th><th>Передел</th><th>Рабочее место</th><th>Км</th><th>Доля мощности, %</th><th>Загрузка передела</th><th>ВП по ПДО, тыс. ₽</th></tr></thead>
+        <tbody>${caps}</tbody></table></div>` : ''}`;
   }
 
   // ---------- пульс ПДО ----------
@@ -736,6 +749,58 @@
     $('#pulseLoadTitle').textContent = L.snapshot ? `Загрузка переделов, % (снимок «Загрузки РЦ» от ${fmt(L.snapshot)}, твёрдый план Z0+Z4)` : 'Загрузка переделов — снимков «Загрузки РЦ» пока нет';
     $('#pulseLoad thead').innerHTML = L.snapshot ? `<tr><th>Передел</th>${L.decades.map(x => `<th>${fmt(x)}</th>`).join('')}</tr>` : '';
     $('#pulseLoad tbody').innerHTML = L.rows.map(r => `<tr><td>${esc(r.group)}</td>${L.decades.map(x => `<td class="num ${loadCls(r[x])}">${r[x] == null ? '' : r[x]}</td>`).join('')}</tr>`).join('');
+  }
+
+  // ---------- окно мощности ----------
+  const KIND_MARK = { 'сейчас': '', 'прогноз': 'прогноз', 'обычно': 'обычно' };
+  const mlnOrDash = v => (v == null ? '—' : num(v / 1e6, 1));
+  async function loadCapacity() {
+    const d = await api('api/capacity?' + new URLSearchParams({ ...baseParams(), ...filterParams() }));
+    $('#capEmpty').hidden = true;
+    $('#capLead').textContent = d.lead_max;
+    $('#capFree').textContent = d.free_load;
+    if (!d.snapshot) {
+      $('#capEmpty').hidden = false;
+      $('#capEmpty').textContent = 'Снимков «Загрузки РЦ» пока нет: загрузите «Сводный версия 010 от …» или сводку «Загрузка РЦ ДД.ММ» во вкладке «Загрузка».';
+    }
+    const t = d.total;
+    $('#capMeta').innerHTML = `Загрузка переделов — снимок от ${fmt(d.snapshot)}; позиции и маршруты — «Сводный» от ${fmt(d.positions_snapshot)}.
+      В работе ${num(t.positions, 0)} поз., МП ${mlnOrDash(t.mp)} млн ₽, из них под риском <b class="neg">${mlnOrDash(t.risk)} млн ₽</b> (${num(t.risk_positions, 0)} поз.).`;
+    const decs = d.decades;
+    const sumRow = (label, key, f) => `<tr class="sub"><td colspan="5">${label}</td>${decs.map(x => `<td class="num">${(d.summary[x] || {})[key] != null ? f(d.summary[x][key]) : ''}</td>`).join('')}<td></td></tr>`;
+    $('#capGroups thead').innerHTML = `<tr><th>Группа</th><th>В работе, поз.</th><th>МП в работе, млн ₽</th>
+      <th title="Просрочено, не принято ПДО, ждём материал, перегруз передела — позиция считается один раз">Под риском, млн ₽</th>
+      <th>Ключевые переделы (доля позиций)</th>${decs.map(x => `<th>${fmt(x)}</th>`).join('')}<th>Окно</th></tr>`;
+    const parts = g => Object.entries(g.parts || {}).map(([k, v]) => `${{ overdue: 'просрочено', pdo_rejected: 'не принято ПДО', deficit_real: 'ждём материал', overload: 'перегруз' }[k]} ${mlnOrDash(v)}`).join(' · ');
+    $('#capGroups tbody').innerHTML = d.groups.map(g => `<tr>
+      <td><b>${esc(g.group)}</b></td><td class="num">${num(g.positions, 0)}</td><td class="num">${mlnOrDash(g.mp)}</td>
+      <td class="num ${g.risk > 0 ? 'neg' : ''}" title="${esc(parts(g))}">${mlnOrDash(g.risk)}<div class="sub">${num(g.risk_positions, 0)} поз.</div></td>
+      <td class="sub">${g.key.map(k => `${esc(k.short)} ${k.share} %`).join(', ') || (g.routed ? '' : 'нет в «Сводном»')}</td>
+      ${decs.map(x => { const c = g.cells[x]; return c ? `<td class="num ${loadCls(c.value)}">${c.value} %<div class="sub">${esc(c.short)}${KIND_MARK[c.kind] ? ' · ' + KIND_MARK[c.kind] : ''}</div></td>` : '<td></td>'; }).join('')}
+      <td>${g.free_decade ? fmt(g.free_decade) : (g.key.length ? '<span class="late-tag">нет в горизонте</span>' : '')}</td></tr>`).join('')
+      + sumRow('Твёрдый план (Z0+Z4), объём, км', 'km_total', v => num(v, 0)) + sumRow('Твёрдый план, ВП, млн ₽', 'vp_rub', v => num(v / 1e6, 0));
+    $('#capPeredely thead').innerHTML = `<tr><th>Передел</th><th title="Медиана итоговой загрузки за последние декады; в скобках — сколько из них было больше 100 %">Обычно к началу декады</th>${decs.map(x => `<th>${fmt(x)}</th>`).join('')}</tr>`;
+    $('#capPeredely tbody').innerHTML = d.peredely.map(r => `<tr><td>${esc(r.grp)}</td>
+      <td class="num">${r.typical == null ? '—' : r.typical + ' %'}<div class="sub">${r.n ? `>100 % в ${r.over} из ${r.n}` : ''}</div></td>
+      ${decs.map(x => { const c = r.cells[x]; return `<td class="num linkish-cell ${loadCls(c.value)}" data-grp="${esc(r.grp)}" data-dec="${x}">${c.value == null ? '—' : c.value + ' %'}${c.kind !== 'сейчас' ? `<div class="sub">${c.kind}${c.now != null ? ', в снимке ' + c.now : ''}</div>` : ''}</td>`; }).join('')}</tr>`).join('');
+    document.querySelectorAll('#capPeredely td[data-grp]').forEach(td => td.addEventListener('click', () => loadOccupants(td.dataset.grp, td.dataset.dec)));
+  }
+  async function loadOccupants(grp, dec) {
+    const d = await api('api/capacity/occupants?' + new URLSearchParams({ grp, decade: dec }));
+    const c = d.cell;
+    $('#capOcc').innerHTML = `<h3 class="st-h">${esc(d.grp)}, декада ${fmt(d.decade)}</h3>
+      <p class="sub">Загрузка ${c.value == null ? '—' : c.value + ' %'}${c.kind !== 'сейчас' ? ` (${c.kind}; в снимке ${c.now ?? '—'} %)` : ''}.
+        В «Сводном» от ${fmt(d.snapshot)} передел в этой декаде занимают ${num(d.positions, 0)} поз. — ${num(d.share, 1)} % мощности.
+        ВП на 1 % мощности показывает, что ПДО выгоднее оставить в декаде при перегрузе.</p>
+      ${d.rows.length ? `<div class="table-wrap"><table class="mini"><thead><tr><th>Заказ / поз.</th><th>Клиент</th><th>Менеджер</th><th>Изделие</th><th>Группа</th>
+        <th>Рабочее место</th><th>Км</th><th>Доля мощности, %</th><th>ВП, тыс. ₽</th><th>ВП на 1 %, тыс. ₽</th><th>Решение ПДО</th></tr></thead><tbody>
+        ${d.rows.map(r => `<tr data-no="${esc(r.order_no)}"><td><b>${esc(r.order_no)}</b> / ${esc(r.pos)}</td><td>${esc(r.customer || '')}</td><td>${esc(r.manager || '')}</td>
+          <td>${esc(r.product || '')}</td><td>${esc(r.product_group || '')}</td><td>${esc(r.place || '')}</td><td class="num">${num(r.km, 3)}</td>
+          <td class="num">${num(r.load, 2)}</td><td class="num">${kRub(r.vp)}</td><td class="num">${r.vp_per_pct == null ? '—' : kRub(r.vp_per_pct)}</td>
+          <td class="${r.pdo_last_status === 'не принят' ? 'late-tag' : ''}">${esc(r.pdo_last_status || '')}</td></tr>`).join('')}
+      </tbody></table></div>` : '<p class="muted">В последнем «Сводном» позиций в этой декаде нет — декада ещё не заполнена твёрдым планом.</p>'}`;
+    document.querySelectorAll('#capOcc tr[data-no]').forEach(tr => tr.addEventListener('click', () => openOrder(tr.dataset.no)));
+    $('#capOcc').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   // ---------- карточка заказа ----------

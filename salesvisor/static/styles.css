@@ -300,3 +300,9 @@ table.mini.sub td:nth-child(3) { min-width: 180px; }
 .path-tags { margin-top: 2px; display: flex; flex-wrap: wrap; gap: 4px; }
 .warn-cell { color: var(--warn); font-weight: 600; }
 #pulseSignals ul { margin: 6px 0 0 18px; padding: 0; }
+#capPeredely td.linkish-cell { cursor: pointer; }
+#capPeredely td.linkish-cell:hover { outline: 1px solid var(--line); background: #f7f9fd; }
+#capGroups td:first-child { min-width: 150px; overflow-wrap: normal; }
+#capGroups td:nth-child(5) { white-space: normal; min-width: 200px; max-width: 280px; }
+#capGroups td .sub, #capPeredely td .sub { white-space: nowrap; }
+#capPeredely td:first-child { min-width: 170px; overflow-wrap: normal; }

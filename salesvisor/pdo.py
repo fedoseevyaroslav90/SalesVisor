@@ -22,7 +22,8 @@ from sqlalchemy.engine import Engine
 
 from . import parsing as p
 from .brands import decode
-from .db import change_log, deficits, pdo_decision, pdo_files, pdo_rows, positions, wc_load, wc_map
+from .db import (change_log, dec_summary, deficits, pdo_decision, pdo_files, pdo_rows, positions, wc_load,
+                 wc_map, wc_pos)
 
 KINDS = ("pdo_plan", "pdo_fact", "load", "materials")
 KIND_NAMES = {"pdo_plan": "план ПДО (принято / не принято)", "pdo_fact": "итог декады ПДО", "load": "загрузка переделов",
@@ -34,6 +35,8 @@ RE_MONTH = re.compile(r"в\s+[А-ЯЁа-яё]+\s+ver\.?\s*(\d+)(?:\s+(\d{1,2})\.
 RE_MAT = re.compile(r"на\s+(\d{1,2})\.(\d{1,2})\.(\d{2,4})")
 RE_LOAD = re.compile(r"Сводный\s+версия\s+(\d{3})\s*(трудоемкость)?\s+от\s+(\d{1,2})\.(\d{1,2})\.(\d{4})", re.I)
 RE_SHEET = re.compile(r"(\d\d)\.(\d\d)\s*-\s*(\d\d)\.(\d\d)")
+RE_SUM_NAME = re.compile(r"(?<!\d)(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?(?!\d)")
+RE_SUM_HDR = re.compile(r"на\s+(\d{1,2})\.(\d{1,2})\.(\d{4})")
 STATUS_RE = re.compile(r"^(принят[оа]?/непринят[оа]?|готов/неготов)$")
 
 
@@ -91,6 +94,8 @@ def kind_by_name(name: str) -> str | None:
         return "materials"
     if "сводный версия" in low and "трудоемк" not in low:
         return "load"
+    if "загрузка рц" in low:                   # короткая сводка ПДО «Загрузка РЦ ДД.ММ» (с 21.09.2026)
+        return "load"
     return None
 
 
@@ -119,6 +124,8 @@ def sniff(data: bytes, filename: str) -> str | None:
                 continue
             for i, row in enumerate(ws.iter_rows(max_row=12, values_only=True)):
                 cells = [_norm(c) for c in row]
+                if i == 0 and cells and cells[0] == "загрузкарц":
+                    return "load"                  # короткая сводка без даты в имени («21.09.xlsx»)
                 if "заказклиента" in cells:
                     st = next((c for c in cells if STATUS_RE.match(c)), None)
                     if st:
@@ -140,7 +147,24 @@ def sort_key(kind: str, name: str) -> tuple:
         g = m.groups()
         d = date(_year(g[2]), int(g[1]), int(g[0])) if kind == "materials" else date(int(g[4]), int(g[3]), int(g[2]))
         return (d, 2, 0)
+    if kind == "load":
+        d = _summary_date(name)
+        if d:
+            return (d, 2, 1)
     return (date.min, 9, 0)
+
+
+def _summary_date(name: str, year: int | None = None) -> date | None:
+    """Дата короткой сводки по имени файла: «Загрузка РЦ 28.09.xlsx», «21.09.xlsx» (год — из заголовка или текущий)."""
+    m = RE_SUM_NAME.search(name or "")
+    if not m:
+        return None
+    today = date.today()
+    y = _year(m.group(3)) if m.group(3) else year or (today.year if int(m.group(2)) <= today.month + 1 else today.year - 1)
+    try:
+        return date(y, int(m.group(2)), int(m.group(1)))
+    except ValueError:
+        return None
 
 
 def _event(conn, rows: list[dict]) -> None:
@@ -443,66 +467,196 @@ def load_materials(engine: Engine, data: bytes, filename: str, published_at: dat
 
 # ---------------------------------------------------------------- загрузка переделов
 
-def parse_load(data: bytes, filename: str) -> tuple[str, date, list[dict], dict]:
-    m = RE_LOAD.search(filename)
-    if not m or m.group(2):
-        raise ValueError("имя файла не похоже на «Сводный версия NNN от ДД.ММ.ГГГГ»")
-    ver, snap = m.group(1), date(int(m.group(5)), int(m.group(4)), int(m.group(3)))
-    wb = _wb(data)
-    recs, wpmap = [], {}
+# Итоги декады в листе «Свод» и в короткой сводке ПДО (подписи строк → метрика dec_summary)
+SUMMARY_METRICS = (("из них с по z4", "km_z4"), ("из них с по z6", "km_z6"), ("из них с по z7", "km_z7"),
+                   ("общий объем", "km_total"), ("средняя длина", "avg_len"), ("объем ов", "fiber_km"),
+                   ("валовая прибыль", "vp_rub"))
+
+
+def _dec_of_title(title, snap: date, wrap: bool = False) -> date | None:
+    """«21.09 - 30.09» → конец декады. «Сводный» — календарный год снимка; короткая сводка смотрит на 4 декады вперёд,
+    у неё на стыке лет январь — следующего года (wrap)."""
+    ms = RE_SHEET.fullmatch(str(title or "").strip())
+    if not ms:
+        return None
+    m, d = int(ms.group(4)), int(ms.group(3))
+    y = snap.year + ((1 if m < snap.month - 6 else -1 if m > snap.month + 6 else 0) if wrap else 0)
     try:
+        return dec_end(date(y, m, d))
+    except ValueError:
+        return None
+
+
+def _summary_rows(rows, snap: date, ver: str, wrap: bool = False) -> tuple[list[dict], list[dict]]:
+    """Лист «Свод» и короткая сводка ПДО: строка с декадами «ДД.ММ - ДД.ММ» задаёт столбцы, дальше подпись в первой
+    ячейке — итог декады (объём, Z4/Z6/Z7, волокно, ВП) или загрузка передела («… %»). В короткой сводке у брони нет
+    своей строки, есть линии (CTRL, KJY, LBK…): загрузкой передела считаем самую высокую из них."""
+    loads, summary, cols, group = [], [], {}, None
+    for row in rows:
+        cells = list(row or ())
+        decs = {j: _dec_of_title(c, snap, wrap) for j, c in enumerate(cells)
+                if isinstance(c, str) and RE_SHEET.fullmatch(c.strip())}
+        if decs:
+            cols, group = {j: d for j, d in decs.items() if d}, None
+            continue
+        if not cols or not cells or cells[0] is None:
+            continue
+        label = re.sub(r"\s+", " ", str(cells[0])).strip()
+        low = label.lower().replace("ё", "е")
+        vals = {}
+        for j, d in cols.items():
+            v = _num(cells[j]) if j < len(cells) else None
+            if v is not None:
+                vals[d] = v
+        metric = next((m for key, m in SUMMARY_METRICS if low.startswith(key)), "km_po" if low == "из них с по" else None)
+        if metric:
+            summary += [{"ver": ver, "snap_date": snap, "decade_end": d, "metric": metric, "value": v} for d, v in vals.items()]
+        elif label.endswith("%"):
+            group = label.rstrip(" %").strip()[:60]
+            loads += [{"ver": ver, "snap_date": snap, "decade_end": d, "level": "группа", "name": group, "grp": group,
+                       "km": None, "load": v, "cap": None} for d, v in vals.items()]
+        elif group and vals:
+            loads += [{"ver": ver, "snap_date": snap, "decade_end": d, "level": "место", "name": label[:60], "grp": group,
+                       "km": None, "load": v, "cap": None} for d, v in vals.items()]
+    have = {(r["decade_end"], r["name"]) for r in loads if r["level"] == "группа"}
+    best = {}
+    for r in loads:
+        k = (r["decade_end"], r["grp"])
+        if r["level"] == "место" and k not in have and (k not in best or r["load"] > best[k]["load"]):
+            best[k] = r
+    loads += [{**r, "level": "группа", "name": r["grp"]} for r in best.values()]
+    return loads, summary
+
+
+def _header_cols(r3) -> tuple[list[tuple[int, str, str, bool]], dict]:
+    """Строка 3 листа декады: столбцы переделов («1Д. МОДУЛЬН-БУФЕР %») и рабочих мест («WOEL41-2_1100_…»)."""
+    cols, wpmap, group = [], {}, None
+    for j, h in enumerate(r3):
+        h = str(h or "").strip()
+        if not h:
+            continue
+        is_group = bool(re.match(r"^(\dД\.|ЛИНИ|МОБИЛЬН|ОКОНЦОВКА)", h))
+        is_wp = h.startswith("W") and "_" in h
+        if not (is_group or is_wp):
+            continue
+        if is_group:
+            group = h.rstrip(" %")
+        name = h.rstrip(" %") if is_group else re.sub(r"^W|_\d+_\d+$", "", h)
+        if is_wp and group:
+            wpmap[name] = group
+        cols.append((j, name[:60], (group or "")[:60], is_group))
+    return cols, wpmap
+
+
+def parse_load(data: bytes, filename: str, published_at: datetime | None = None, with_positions: bool = True) -> dict:
+    """«Сводный версия NNN от ДД.ММ.ГГГГ» — листы-декады: строка 3 переделы и рабочие места, 5 мощность, 6 «Итого»
+    (длина, км / загрузка, %), ниже — позиции заказов (пары строк; в первой — заказ, позиция, ВП, длина и доля
+    мощности по каждому переделу). Лист «Свод» — итоги декад. Короткая сводка «Загрузка РЦ ДД.ММ» — только итоги и
+    загрузка переделов на 4 декады (версия 010: твёрдый план Z0+Z4)."""
+    m = RE_LOAD.search(filename)
+    if m and m.group(2):
+        raise ValueError("«Сводный … трудоемкость» не разбирается: в нём люди и нормо-часы, а не загрузка переделов")
+    wb = _wb(data)
+    try:
+        if not m:
+            ws = wb.worksheets[0]
+            rows = list(ws.iter_rows(max_row=80, values_only=True))
+            hdr = next((RE_SUM_HDR.search(str(c)) for r in rows[:6] for c in r if c and RE_SUM_HDR.search(str(c))), None)
+            hdr_d = date(int(hdr.group(3)), int(hdr.group(2)), int(hdr.group(1))) if hdr else None
+            # дата снимка — из имени файла (в сводке 28.09 заголовок остался «на 21.09»), иначе из заголовка
+            snap = _summary_date(filename, hdr_d.year if hdr_d else None) or hdr_d or (published_at or datetime.now()).date()
+            loads, summary = _summary_rows(rows, snap, "010", wrap=True)
+            if not loads:
+                raise ValueError("не похоже на сводку «Загрузка РЦ»: нет строк загрузки переделов по декадам")
+            return {"kind": "summary", "ver": "010", "snap": snap, "loads": loads, "wpmap": {}, "summary": summary, "positions": []}
+        ver, snap = m.group(1), date(int(m.group(5)), int(m.group(4)), int(m.group(3)))
+        loads, wpmap, summary, pos = [], {}, [], {}
         for ws in wb.worksheets:
-            ms = RE_SHEET.fullmatch(ws.title.strip())
-            if not ms:
+            if ws.title.strip().lower() == "свод":
+                summary = _summary_rows(ws.iter_rows(max_row=200, values_only=True), snap, ver)[1]
                 continue
-            try:
-                dec = date(snap.year, int(ms.group(4)), int(ms.group(3)))
-            except ValueError:
+            dec = _dec_of_title(ws.title, snap)
+            if not dec:
                 continue
-            rows = list(ws.iter_rows(max_row=6, values_only=True))
-            if len(rows) < 6:
+            it = ws.iter_rows(values_only=True)
+            head = [r for _, r in zip(range(6), it)]
+            if len(head) < 6:
                 continue
-            r3, r5, r6 = rows[2], rows[4], rows[5]
-            group = None
-            for j, h in enumerate(r3):
-                h = str(h or "").strip()
-                if not h or j + 1 >= len(r6):
+            r3, r5, r6 = head[2], head[4], head[5]
+            cols, wp = _header_cols(r3)
+            wpmap.update(wp)
+            for j, name, group, is_group in cols:
+                if j + 1 >= len(r6):
                     continue
-                is_group = bool(re.match(r"^(\dД\.|ЛИНИ|МОБИЛЬН|ОКОНЦОВКА)", h))
-                is_wp = h.startswith("W") and "_" in h
-                if not (is_group or is_wp):
-                    continue
-                if is_group:
-                    group = h.rstrip(" %")
-                name = h.rstrip(" %") if is_group else re.sub(r"^W|_\d+_\d+$", "", h)
-                if is_wp and group:
-                    wpmap[name] = group
                 cap = p.parse_number(re.sub(r"[^\d.,]", "", str(r5[j] or ""))) if j < len(r5) else None
-                recs.append({"ver": ver, "snap_date": snap, "decade_end": dec, "level": "группа" if is_group else "место",
-                             "name": name[:60], "grp": (group or "")[:60], "km": _num(r6[j]), "load": _num(r6[j + 1]), "cap": cap})
+                loads.append({"ver": ver, "snap_date": snap, "decade_end": dec, "level": "группа" if is_group else "место",
+                              "name": name, "grp": group, "km": _num(r6[j]), "load": _num(r6[j + 1]), "cap": cap})
+            if not with_positions or dec < dec_end(snap):
+                continue
+            vp_col = next((j for j, h in enumerate(r3) if str(h or "").strip().lower().startswith(("валовая", "вп"))), None)
+            for r in it:
+                if not r or len(r) < 2:
+                    continue
+                o, ps = _key(r[0]), _key(r[1])
+                if not re.fullmatch(r"1\d{9}", o) or not ps.isdigit():
+                    continue
+                ps = str(int(ps))
+                vp = _num(r[vp_col]) if vp_col is not None and vp_col < len(r) else None
+                for j, name, group, is_group in cols:
+                    km = _num(r[j]) if j < len(r) else None
+                    if not km or km <= 0:
+                        continue
+                    k = (dec, o, ps, group, "" if is_group else name)
+                    x = pos.setdefault(k, {"decade_end": dec, "order_no": o, "pos": ps, "grp": group, "place": k[4],
+                                           "km": 0.0, "load": 0.0, "vp": 0.0, "ver": ver, "snap_date": snap})
+                    x["km"] += km
+                    x["load"] += (_num(r[j + 1]) or 0.0) if j + 1 < len(r) else 0.0
+                    x["vp"] += vp or 0.0
+        return {"kind": "full", "ver": ver, "snap": snap, "loads": loads, "wpmap": wpmap, "summary": summary,
+                "positions": list(pos.values())}
     finally:
         wb.close()
-    return ver, snap, recs, wpmap
 
 
 def load_load(engine: Engine, data: bytes, filename: str, published_at: datetime | None = None,
               attachment_id: str | None = None) -> dict:
-    ver, snap, recs, wpmap = parse_load(data, filename)
+    from . import capacity          # capacity → queries → pdo: импорт здесь, чтобы не было круга
+
+    m = RE_LOAD.search(filename)
+    with engine.connect() as conn:
+        last_pos = conn.execute(select(func.max(wc_pos.c.snap_date))).scalar()
+    snap_name = date(int(m.group(5)), int(m.group(4)), int(m.group(3))) if m and not m.group(2) else None
+    # позиции — только из самого свежего «Сводного» версии 010 (твёрдый план; в 100 — ещё и прогнозные Z6/Z7):
+    # история загрузки хранится в итогах, а разбор строк позиций долгий
+    want_pos = bool(m and m.group(1) == "010" and not (snap_name and last_pos and snap_name < last_pos))
+    res = parse_load(data, filename, published_at, with_positions=want_pos)
+    ver, snap = res["ver"], res["snap"]
     uniq = {}
-    for r in recs:
+    for r in res["loads"]:
         uniq[(r["decade_end"], r["level"], r["name"])] = r
+    summ = {(r["decade_end"], r["metric"]): r for r in res["summary"]}
     with engine.begin() as conn:
         _file(conn, kind="load", origin=filename, attachment_id=attachment_id, published_at=published_at or datetime.now(),
               report_date=snap, version=int(ver), rows=len(uniq))
         conn.execute(delete(wc_load).where(wc_load.c.ver == ver, wc_load.c.snap_date == snap))
         if uniq:
             conn.execute(insert(wc_load), list(uniq.values()))
-        for name, grp in wpmap.items():
+        conn.execute(delete(dec_summary).where(dec_summary.c.ver == ver, dec_summary.c.snap_date == snap))
+        if summ:
+            conn.execute(insert(dec_summary), list(summ.values()))
+        for name, grp in res["wpmap"].items():
             conn.execute(delete(wc_map).where(wc_map.c.name == name))
             conn.execute(insert(wc_map).values(name=name, grp=grp, updated_at=datetime.now()))
+        if res["positions"] and (not last_pos or snap >= last_pos):
+            conn.execute(delete(wc_pos))
+            rows = res["positions"]
+            for i in range(0, len(rows), 5000):
+                conn.execute(insert(wc_pos), rows[i:i + 5000])
         refreshed = refresh_positions(conn, None, only_load=True)
+        routes = capacity.refresh_routes(conn)
     return {"source": "load", "file": filename, "version": ver, "snapshot": snap.isoformat(), "records": len(uniq),
-            "work_places": len(wpmap), "positions": refreshed}
+            "work_places": len(res["wpmap"]), "summary": len(summ), "position_rows": len(res["positions"]),
+            "positions": refreshed, "routes": routes, "format": res["kind"]}
 
 
 LOADERS = {"pdo_plan": load_pdo, "pdo_fact": load_pdo, "materials": load_materials, "load": load_load}
@@ -626,14 +780,15 @@ def refresh_brands(conn) -> None:
 
 # ---------------------------------------------------------------- карточка позиции
 
-def card(conn, order_no: str) -> dict:
-    """Путь в производстве по позициям заказа: решения ПДО по декадам, итоги декад, дефициты."""
+def card(conn, order_no: str, today: date | None = None) -> dict:
+    """Путь в производстве по позициям заказа: решения ПДО по декадам, итоги декад, дефициты, переделы в декаде
+    твёрдого плана («Загрузка РЦ»)."""
     loads = _load_lookup(conn)
     groups = {r.name: r.grp for r in conn.execute(select(wc_map))}
     dec = defaultdict(lambda: defaultdict(list))
     for d in conn.execute(select(pdo_decision).where(pdo_decision.c.order_no == order_no)):
         dec[d.pos][(d.kind, d.decade_end)].append(dict(d._mapping))
-    out = defaultdict(lambda: {"plan": [], "fact": [], "deficits": []})
+    out = defaultdict(lambda: {"plan": [], "fact": [], "deficits": [], "capacity": []})
     for pos_, kd in dec.items():
         for (kind, decade), rs in sorted(kd.items(), key=lambda x: x[0][1]):
             s = _pos_summary(rs)
@@ -649,6 +804,9 @@ def card(conn, order_no: str) -> dict:
     for d in conn.execute(select(deficits).where(deficits.c.order_no == order_no)
                           .order_by(deficits.c.active.desc(), deficits.c.last_seen.desc())):
         out[d.pos]["deficits"].append({k: (v.isoformat() if isinstance(v, date) else v) for k, v in d._mapping.items()})
+    from . import capacity
+    for pos_, rows in capacity.card_rows(conn, order_no, today).items():
+        out[pos_]["capacity"] = rows
     return dict(out)
 
 

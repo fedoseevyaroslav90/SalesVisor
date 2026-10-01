@@ -17,6 +17,7 @@
       <button data-tab="changes">Изменения</button>
       <button data-tab="stats">Статистика</button>
       <button data-tab="pulse" title="Своевременность и полнота решений ПДО, загрузка переделов вперёд">Пульс ПДО</button>
+      <button data-tab="capacity" title="Загрузка переделов на декады вперёд с прогнозом, группы продукции, МП в работе и под риском">Окно мощности</button>
       <button data-tab="load">Загрузка</button>
     </nav>
     <span class="meta-line" id="lastLoad"></span>
@@ -90,7 +91,7 @@
           <label class="check" title="Опоздание к первой дате клиента больше 30 дней: по СТП 02-2-01 покупатель вправе отказаться от поставки"><input type="checkbox" data-flag="late30"> опоздание больше 30 дн.</label>
           <label class="check" title="Последнее решение ПДО по позиции — «не принят» в декаду (или принят частично): причина и узкое место — в карточке заказа"><input type="checkbox" data-flag="pdo_rejected"> не принят ПДО</label>
           <label class="check" title="В последнем отчёте по материалам позиция «не обеспечена» и снабжение пишет «ждём поставку» (не материал на ответственном хранении)"><input type="checkbox" data-flag="deficit_real"> ждём материал</label>
-          <label class="check" title="Рабочее место позиции в декаде плана ПДО загружено больше 100 % по последнему снимку «Загрузки РЦ»"><input type="checkbox" data-flag="overload"> перегруз передела</label>
+          <label class="check" title="Рабочее место, названное ПДО, загружено больше 100 %, или передел, через который идёт позиция, в её декаде твёрдого плана загружен больше 100 % — по последней «Загрузке РЦ» или по прогнозу к началу декады"><input type="checkbox" data-flag="overload"> перегруз передела</label>
         </span>
         <button class="linkish-btn" id="fReset">Сбросить отбор</button>
       </div>
@@ -264,6 +265,26 @@
       <h3 class="st-h" id="pulseLoadTitle">Загрузка переделов</h3>
       <div class="table-wrap"><table id="pulseLoad" class="disp"><thead></thead><tbody></tbody></table></div>
       <p class="muted" id="pulseEmpty" hidden></p>
+    </section>
+
+    <section id="tab-capacity" class="tab">
+      <p class="lead">Сколько мощности переделов занято на декады вперёд и где есть запас — чтобы обещать клиенту срок до размещения
+        и видеть, что стоит за отказами ПДО. Источник — «Загрузка РЦ» ПДО (твёрдый план Z0+Z4). В твёрдом плане дальние декады
+        почти пустые: заказы ещё не размещены. Поэтому рядом со снимком — <b>прогноз к началу декады</b>: снимок плюс обычное
+        дозаполнение этого передела за оставшиеся недели (по истории снимков; не ниже снимка и не выше обычного максимума). Дальше
+        <span id="capLead">4</span> недель прогноз ненадёжен — там показана <b>обычная</b> загрузка передела к началу декады.</p>
+      <p class="sub" id="capMeta"></p>
+      <h3 class="st-h">Группы продукции</h3>
+      <p class="sub">Ключевые переделы — через которые идёт не меньше четверти позиций группы в последнем «Сводном». В декаде —
+        самый загруженный из них. «Окно» — ближайшая декада, где все ключевые переделы загружены меньше <span id="capFree">90</span> %.
+        Деньги — по менеджеру, отделу и отбору на вкладке «Заказы»; в работе — не выпущенные позиции; под риском — просроченные,
+        не принятые ПДО, ждущие материал или с перегрузом передела.</p>
+      <div class="table-wrap"><table id="capGroups" class="disp"><thead></thead><tbody></tbody></table></div>
+      <h3 class="st-h">Переделы</h3>
+      <p class="sub">Щелчок по декаде — какие позиции занимают передел (по последнему «Сводному»), их доля мощности и ВП.</p>
+      <div class="table-wrap"><table id="capPeredely" class="disp"><thead></thead><tbody></tbody></table></div>
+      <div id="capOcc"></div>
+      <p class="muted" id="capEmpty" hidden></p>
     </section>
 
     <section id="tab-load" class="tab">

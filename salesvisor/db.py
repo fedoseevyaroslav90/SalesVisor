@@ -105,6 +105,14 @@ positions = Table(
     Column("deficit_real", Boolean),      # среди них есть «ждём поставку»
     Column("deficit_eta", Date),          # самая поздняя ожидаемая поставка
     Column("deficit_materials", String(300)),
+    # Окно мощности (этап 2): декада позиции в твёрдом плане «Загрузки РЦ», её ВП по ПДО, переделы, через которые она
+    # идёт, и самая высокая загрузка среди них в этой декаде — сейчас или по прогнозу к началу декады (capacity.py)
+    Column("plan_decade", Date),
+    Column("plan_vp", Float),
+    Column("route", String(200)),
+    Column("route_load", Float),
+    Column("route_bottleneck", String(60)),
+    Column("route_kind", String(10)),     # сейчас | прогноз | обычно
     Column("first_seen_at", DateTime, server_default=func.now()),
     Column("updated_at", DateTime, server_default=func.now()),
 )
@@ -350,6 +358,32 @@ wc_map = Table(
     Column("name", String(40), primary_key=True),
     Column("grp", String(60)),
     Column("updated_at", DateTime, server_default=func.now()),
+)
+
+# Позиции в последнем снимке «Загрузки РЦ» (только он: история — в wc_load): сколько км позиции идёт через передел
+# и рабочее место в декаде и какую долю их мощности занимает, ВП позиции по расчёту ПДО. place = '' — итог передела
+wc_pos = Table(
+    "wc_pos", metadata,
+    Column("decade_end", Date, primary_key=True),
+    Column("order_no", String(20), primary_key=True),
+    Column("pos", String(10), primary_key=True),
+    Column("grp", String(60), primary_key=True),
+    Column("place", String(40), primary_key=True),
+    Column("km", Float),
+    Column("load", Float),
+    Column("vp", Float),
+    Column("ver", String(5)),
+    Column("snap_date", Date, index=True),
+)
+
+# Итоги декады из листа «Свод» «Загрузки РЦ» и короткой сводки ПДО: объём, из него Z4/Z6/Z7, волокно, ВП
+dec_summary = Table(
+    "dec_summary", metadata,
+    Column("ver", String(5), primary_key=True),
+    Column("snap_date", Date, primary_key=True),
+    Column("decade_end", Date, primary_key=True),
+    Column("metric", String(20), primary_key=True),
+    Column("value", Float),
 )
 
 # Вложения задач Битрикса, уже просмотренные сборщиком (чтобы не качать повторно)

@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.engine import Engine
 
-from . import pdo
+from . import capacity, pdo
 from .brands import GROUPS
 from .db import bitrix_links, change_log, comments, dispatcher, positions, quality_msgs, segments, snapshots
 
@@ -85,7 +85,14 @@ def position_view(pos: dict, today: date) -> dict:
                and due_d.replace(day=1 if due_d.day <= 10 else 11 if due_d.day <= 20 else 21) <= today)
     # Путь в производстве: последнее решение ПДО — отказ, реальный дефицит материала, перегруз передела
     pdo_rejected = (pos.get("pdo_last_status") in ("не принят", "частично") and not pos.get("closed") and not rel)
-    overload = bool((pos.get("wc_load") or 0) > 100 and not pos.get("closed") and not rel)
+    # перегруз: место, названное ПДО, загружено >100 %, или передел маршрута в декаде твёрдого плана — сейчас или по
+    # прогнозу к началу декады (capacity.py); «обычная» загрузка дальних декад отметку не ставит, прошедшая декада —
+    # тоже (там уже просрочка, а не перегруз)
+    plan_dec = pos.get("plan_decade")
+    plan_dec = date.fromisoformat(plan_dec) if isinstance(plan_dec, str) else plan_dec
+    route_over = ((pos.get("route_load") or 0) > 100 and pos.get("route_kind") in capacity.RISK_KINDS
+                  and plan_dec is not None and plan_dec >= pdo.dec_end(today))
+    overload = bool(((pos.get("wc_load") or 0) > 100 or route_over) and not pos.get("closed") and not rel)
     return {**{k: _iso(v) for k, v in pos.items()}, "due_date": _iso(due_d), "overdue": overdue, "stale": stale,
             "pdo_rejected": pdo_rejected, "overload": overload,
             "released": rel, "release_date": _iso(fact_d) if rel else None,
@@ -240,7 +247,8 @@ POSITION_FIELDS = ("order_no", "pos", "customer", "sales_dept", "manager", "prod
                    "mp_rub", "mz_rub", "days_late", "priority", "released", "release_date", "brand", "product_group",
                    "pdo_first_date", "pdo_rejects", "pdo_last_decade", "pdo_last_status", "pdo_last_reason",
                    "pdo_last_bottleneck", "pdo_last_wc", "pdo_last_move", "pdo_fact_status", "wc_group", "wc_load",
-                   "deficit_active", "deficit_real", "deficit_eta", "deficit_materials", "pdo_rejected", "overload")
+                   "deficit_active", "deficit_real", "deficit_eta", "deficit_materials", "pdo_rejected", "overload",
+                   "plan_decade", "plan_vp", "route", "route_load", "route_bottleneck", "route_kind")
 
 
 def _filtered_positions(engine: Engine, scope: str, manager: str, dept: str, f: Filters, today: date) -> list[dict]:
@@ -409,11 +417,11 @@ def order_card(engine: Engine, order_no: str, today: date | None = None) -> dict
         link = conn.execute(select(bitrix_links).where(bitrix_links.c.order_no == order_no)).first()
         quality = [_row(r) for r in conn.execute(select(quality_msgs).where(quality_msgs.c.order_no == order_no)
                                                    .order_by(desc(quality_msgs.c.plan_end_date)))]
-        path = pdo.card(conn, order_no)      # путь в производстве: решения ПДО, итоги декад, дефициты
+        path = pdo.card(conn, order_no, today)   # путь в производстве: решения ПДО, итоги декад, дефициты, переделы
     ps.sort(key=lambda p: _pos_sort(p["pos"]))
     for p in ps:
         p["segments"] = sorted(segs.get(p["pos"], []), key=lambda s: _pos_sort(s["seg_no"]))
-        p["path"] = path.get(p["pos"], {"plan": [], "fact": [], "deficits": []})
+        p["path"] = path.get(p["pos"], {"plan": [], "fact": [], "deficits": [], "capacity": []})
     for c in changes:
         c["field_name"] = FIELD_NAMES.get(c["field"], c["field"])
     sap_task = next((p["bitrix_task"] for p in ps if p.get("bitrix_task")), None)

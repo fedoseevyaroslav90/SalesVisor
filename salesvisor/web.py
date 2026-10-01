@@ -5,6 +5,7 @@ import hmac
 import json
 import re
 import zipfile
+from datetime import date
 from pathlib import Path
 from urllib.parse import quote, unquote
 
@@ -18,7 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.engine import Engine
 
-from . import export, pdo, queries
+from . import capacity, export, pdo, queries
 from .config import Settings, get_settings
 from .bitrix import Bitrix, live_info
 from .db import bitrix_links, comments, make_engine, user_prefs
@@ -260,6 +261,22 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
     def api_pdo_pulse(decades: int = 12):
         """Пульс ПДО: своевременность и полнота решений по декадам, сигналы, загрузка переделов вперёд."""
         return pdo.pulse(engine, decades=max(4, min(decades, 40)))
+
+    @app.get("/api/capacity")
+    def api_capacity(request: Request, decades: int = 6, manager: str = "", dept: str = ""):
+        """Окно мощности: переделы на декады вперёд (сейчас → прогноз), группы продукции, МП в работе и под риском
+        (деньги — по менеджеру, отделу и отбору, как на вкладке «Заказы»)."""
+        return capacity.window(engine, decades=max(3, min(decades, 12)), manager=manager, dept=dept,
+                               filters=filters_of(request))
+
+    @app.get("/api/capacity/occupants")
+    def api_capacity_occupants(grp: str, decade: str):
+        """Позиции, занимающие передел в декаде по последней «Загрузке РЦ»."""
+        try:
+            d = date.fromisoformat(decade)
+        except ValueError:
+            raise HTTPException(400, "decade: ГГГГ-ММ-ДД")
+        return capacity.occupants(engine, grp, d)
 
     @app.get("/api/changes")
     def api_changes(days: int = 7, manager: str = ""):
