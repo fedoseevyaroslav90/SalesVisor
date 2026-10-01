@@ -386,6 +386,20 @@ dec_summary = Table(
     Column("value", Float),
 )
 
+# Задачи Битрикса, вложения которых собирает сборщик ПДО (ведутся во вкладке «Загрузка»; при первом запуске —
+# из PDO_TASK_IDS). Убранная задача остаётся строкой с active = false: её файлы и история не удаляются
+bitrix_watch = Table(
+    "bitrix_watch", metadata,
+    Column("task_id", String(20), primary_key=True),
+    Column("title", String(300)),
+    Column("active", Boolean, nullable=False),
+    Column("added_by", String(100)),
+    Column("added_at", DateTime, server_default=func.now()),
+    Column("removed_at", DateTime),
+    Column("checked_at", DateTime),       # когда сборщик последний раз читал комментарии задачи
+    Column("last_error", String(300)),    # ошибка последней проверки (например, вебхук не видит задачу)
+)
+
 # Вложения задач Битрикса, уже просмотренные сборщиком (чтобы не качать повторно)
 bitrix_files = Table(
     "bitrix_files", metadata,

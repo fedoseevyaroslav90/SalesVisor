@@ -90,6 +90,7 @@
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
     if (b.dataset.tab === 'changes') loadChanges();
     if (b.dataset.tab === 'pulse') loadPulse().catch(err => { $('#pulseEmpty').hidden = false; $('#pulseEmpty').textContent = 'Не удалось загрузить: ' + err.message; });
+    if (b.dataset.tab === 'load') loadSourcesTab().catch(err => { $('#watchResult').className = 'result error'; $('#watchResult').textContent = err.message; });
     if (b.dataset.tab === 'capacity') loadCapacity().catch(err => { $('#capEmpty').hidden = false; $('#capEmpty').textContent = 'Не удалось загрузить: ' + err.message; });
     if (b.dataset.tab === 'stats') loadStats().catch(err => { $('#statsEmpty').hidden = false; $('#statsEmpty').textContent = 'Не удалось посчитать: ' + err.message; });
     if (b.dataset.tab === 'day') loadDay().catch(showDayErr);
@@ -1211,9 +1212,15 @@
   });
 
   // ---------- загрузка ----------
-  const SOURCE_NAME = { segments: 'Отчёт по отрезкам', svetofor: 'Светофор', plan: 'План производства (ZPP context)', dispatcher: 'Диспетчерский отчёт' };
+  const SOURCE_NAME = { segments: 'Отчёт по отрезкам', svetofor: 'Светофор', plan: 'План производства (ZPP context)', dispatcher: 'Диспетчерский отчёт',
+    pdo_plan: 'Отчёт ПДО «принято / не принято»', pdo_fact: 'Отчёт ПДО «и факт»', materials: 'Отчёт по материалам', load: 'Загрузка РЦ' };
   function loadSummary(r) {
     if (r.source === 'bitrix') return `Битрикс24: комментариев о переносах ${r.comments_for_changes}.`;
+    if (r.source === 'bitrix_pdo') return `Задачи Битрикса: ${r.error}.`;
+    if (['pdo_plan', 'pdo_fact', 'materials', 'load'].includes(r.source)) {
+      const d = r.decade || r.snapshot || r.report_date;
+      return `${SOURCE_NAME[r.source]}${d ? ' от ' + fmt(d) : ''}: загружен${r.events != null ? `, событий ${r.events}` : ''}${r.skipped ? ` (${r.skipped})` : ''}.`;
+    }
     const parts = [`строк ${r.rows}`, `позиций ${r.positions}`];
     if (r.new) parts.push(`новых ${r.new}`);
     parts.push(`изменений ${r.changes ?? 0}`);
@@ -1223,24 +1230,88 @@
     return `${SOURCE_NAME[r.source] || r.source}: ${parts.join(', ')}.`;
   }
 
+  // несколько файлов — по очереди; отчёты ПДО — в порядке имени (декада, версия), дата публикации — время файла
   $('#file').addEventListener('change', async e => {
-    const file = e.target.files[0];
-    if (!file) return;
+    const files = [...e.target.files].sort((a, b) => a.lastModified - b.lastModified || a.name.localeCompare(b.name, 'ru'));
+    if (!files.length) return;
     const out = $('#loadResult');
     out.className = 'result';
-    out.textContent = 'Загружаем, большие файлы обрабатываются до минуты…';
-    const fd = new FormData();
-    fd.append('file', file);
+    const lines = [];
+    let failed = 0;
+    for (const [i, file] of files.entries()) {
+      out.innerHTML = lines.map(esc).join('<br>') + (lines.length ? '<br>' : '') + esc(`Загружаем ${i + 1} из ${files.length}: ${file.name}…`);
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('modified', String(file.lastModified || ''));
+      try {
+        const r = await api('api/upload', { method: 'POST', body: fd });
+        lines.push(`${file.name} — ${loadSummary(r)}`);
+      } catch (err) {
+        failed++;
+        lines.push(`${file.name} — не загружен: ${err.message}`);
+      }
+    }
+    out.className = failed ? 'result error' : 'result';
+    out.innerHTML = lines.map(esc).join('<br>');
+    e.target.value = '';
+    await loadMeta();
+    await loadOrders();
+    loadSourcesTab().catch(() => {});
+  });
+
+  // ---------- задачи Битрикса и что загружать ----------
+  const SRC_CLS = { ok: 'n-ok', 'устарел': 'warn-cell', 'пропуски': 'warn-cell', 'давно': 'neg', 'нет': 'neg' };
+  async function loadSourcesTab() {
+    const [w, src] = await Promise.all([api('api/bitrix/watch'), api('api/sources')]);
+    $('#watchCheck').disabled = !w.webhook || w.running;
+    $('#watchState').textContent = !w.webhook ? 'На сервере не задан вебхук Битрикса — задачи не проверяются, отчёты ПДО загружайте файлами.'
+      : w.running ? 'Идёт проверка задач — обновите вкладку через минуту.' : '';
+    $('#watchTable tbody').innerHTML = w.tasks.length ? w.tasks.map(t => `<tr class="${t.active ? '' : 'muted'}">
+      <td>${bxLink('task', t.task_id)}<div class="sub">${esc(t.title || '')}${t.active ? '' : ' · не проверяется с ' + fmt(t.removed_at)}</div>
+        ${t.last_error ? `<div class="sub neg">${esc(t.last_error)}</div>` : ''}</td>
+      <td class="num">${t.loaded}</td><td class="num">${t.skipped}</td><td class="num ${t.failed ? 'neg' : ''}">${t.failed}</td>
+      <td>${t.last_posted ? fmt(t.last_posted) + `<div class="sub">${esc(t.last_file || '')}</div>` : '—'}</td>
+      <td>${t.checked_at ? fmtDT(t.checked_at) : 'ещё нет'}</td><td class="sub">${esc(t.added_by || '')}</td>
+      <td>${t.active ? `<button class="btn secondary" data-unwatch="${esc(t.task_id)}">Убрать</button>` : `<button class="btn secondary" data-rewatch="${esc(t.task_id)}">Вернуть</button>`}</td></tr>`).join('')
+      : '<tr><td colspan="8" class="muted">Задач нет — отчёты ПДО можно загружать только файлами.</td></tr>';
+    document.querySelectorAll('#watchTable [data-unwatch]').forEach(b => b.addEventListener('click', async () => {
+      if (!confirm(`Перестать следить за задачей ${b.dataset.unwatch}? Загруженные из неё отчёты останутся.`)) return;
+      await api('api/bitrix/watch/' + encodeURIComponent(b.dataset.unwatch), { method: 'DELETE' });
+      loadSourcesTab();
+    }));
+    document.querySelectorAll('#watchTable [data-rewatch]').forEach(b => b.addEventListener('click', () => addWatch(b.dataset.rewatch)));
+    $('#srcTable tbody').innerHTML = src.map(s => `<tr>
+      <td>${s.required ? '● ' : ''}<b>${esc(s.name)}</b></td><td class="sub">${esc(s.where)}</td><td>${esc(s.every)}</td>
+      <td class="sub">${esc(s.need)}</td><td>${s.last ? fmt(s.last) : '—'}</td>
+      <td><span class="${SRC_CLS[s.status] || ''}">${esc(s.status)}</span>${s.detail ? `<div class="sub">${esc(s.detail)}</div>` : ''}</td></tr>`).join('');
+  }
+  async function addWatch(task) {
+    const out = $('#watchResult');
+    out.className = 'result';
     try {
-      const r = await api('api/upload', { method: 'POST', body: fd });
-      out.textContent = loadSummary(r);
-      await loadMeta();
-      await loadOrders();
+      const r = await api('api/bitrix/watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task }) });
+      out.textContent = r.error ? `Задача ${r.task_id} добавлена, но сервер её не видит: ${r.error}` : `Задача ${r.task_id} добавлена${r.title ? ' — ' + r.title : ''}. Файлы загрузятся при следующей синхронизации или по «Проверить сейчас».`;
+      if (r.error) out.className = 'result error';
+      $('#watchTask').value = '';
+      loadSourcesTab();
     } catch (err) {
       out.className = 'result error';
       out.textContent = err.message;
     }
-    e.target.value = '';
+  }
+  $('#watchAdd').addEventListener('click', () => { const v = $('#watchTask').value.trim(); if (v) addWatch(v); });
+  $('#watchTask').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#watchAdd').click(); } });
+  $('#watchCheck').addEventListener('click', async () => {
+    const out = $('#watchResult');
+    try {
+      const r = await api('api/bitrix/collect', { method: 'POST' });
+      out.className = 'result';
+      out.textContent = r.started ? 'Проверка запущена: новые файлы загрузятся в фоне, первая проверка задачи — до нескольких минут. Обновите вкладку позже.' : 'Проверка уже идёт.';
+      loadSourcesTab();
+    } catch (err) {
+      out.className = 'result error';
+      out.textContent = err.message;
+    }
   });
   $('#syncBtn').addEventListener('click', async () => {
     const out = $('#syncResult');

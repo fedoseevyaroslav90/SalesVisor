@@ -204,3 +204,67 @@ def test_bitrix_collector(monkeypatch):
         st = {r.attachment_id: r.status for r in c.execute(select(bitrix_files))}
     assert st == {"a1": "loaded", "a2": "skipped", "a3": "skipped"}
     assert collect(engine, settings, bx=FakeBx(files), download=lambda url: blobs[url]) == []   # повторно не качает
+
+
+class FakeBxTasks(FakeBx):
+    """Две задачи: в одной файлы, другую вебхук не видит."""
+
+    def call(self, method, params):
+        if method == "task.commentitem.getlist" and params["TASKID"] == "999":
+            raise RuntimeError("ACCESS_DENIED")
+        return super().call(method, params)
+
+    def get_task(self, tid):
+        if tid == "999":
+            raise RuntimeError("ACCESS_DENIED")
+        return {"id": tid, "title": "ВАЖНЫЕ НОВОСТИ У2 2026 год"}
+
+
+def test_watch_list_add_remove_and_errors(monkeypatch):
+    from salesvisor.bitrix_pdo import add_task, remove_task, task_id_of, watch_list, watched
+
+    engine = make_engine("sqlite:///:memory:")
+    seed(engine)
+    monkeypatch.setenv("PDO_TASK_IDS", "321346")
+    monkeypatch.setenv("BITRIX_WEBHOOK_URL", "https://example.invalid/rest/1/x")
+    settings = Settings()
+    assert task_id_of("https://team.incab.ru/company/personal/user/2289/tasks/task/view/280039/") == "280039"
+    assert task_id_of("321346") == "321346" and task_id_of("задача") is None
+    assert watched(engine, settings) == ["321346"]                       # первый запуск — из PDO_TASK_IDS
+    plan = xlsx({"Sheet1": [PLAN_HDR, plan_row("1200000301", "10", "не принят", "дефицит сырья")]})
+    files = [("a1", "Отчет по принятым заказам в декаду 20.10.2026 ver.1.xlsx", datetime.now() - timedelta(days=2), plan)]
+    bx = FakeBxTasks(files)
+    r = add_task(engine, settings, "https://team.incab.ru/company/personal/user/2289/tasks/task/view/999/", "Федосеев", bx=bx)
+    assert r == {"task_id": "999", "title": None, "error": "RuntimeError: ACCESS_DENIED"}
+    res = collect(engine, settings, bx=bx, download=lambda url: plan)
+    assert [x["bitrix_task"] for x in res] == ["321346"]                 # закрытая задача не мешает остальным
+    w = {t["task_id"]: t for t in watch_list(engine, settings)["tasks"]}
+    assert (w["321346"]["loaded"], w["321346"]["last_error"]) == (1, None)
+    assert w["999"]["last_error"] == "RuntimeError: ACCESS_DENIED" and w["999"]["checked_at"]
+    assert remove_task(engine, "999") and watched(engine, settings) == ["321346"]
+    assert remove_task(engine, "321346") and watched(engine, settings) == []   # пусто, но PDO_TASK_IDS не возвращается
+    assert add_task(engine, settings, "321346", "Федосеев", bx=bx)["title"] == "ВАЖНЫЕ НОВОСТИ У2 2026 год"
+    assert watched(engine, settings) == ["321346"]
+
+
+def test_sources_catalog_and_upload_date():
+    from fastapi.testclient import TestClient
+
+    from salesvisor import sources
+    from salesvisor.web import create_app
+
+    engine = make_engine("sqlite:///:memory:")
+    seed(engine)
+    client = TestClient(create_app(engine, Settings(database_url="sqlite:///:memory:")))
+    plan = xlsx({"Sheet1": [PLAN_HDR, plan_row("1200000301", "10", "не принят", "дефицит сырья")]})
+    stamp = int(datetime(2026, 9, 28, 9, 0).timestamp() * 1000)   # дата файла в прошлом (будущую сервер обрежет до «сейчас»)
+    r = client.post("/api/upload", files={"file": ("Отчет по принятым заказам в декаду 20.10.2026 ver.1.xlsx", plan)},
+                    data={"modified": str(stamp)})
+    assert r.status_code == 200 and r.json()["source"] == "pdo_plan"
+    with engine.connect() as c:                                          # событие — на дату файла, не «сегодня»
+        assert {x.at.date() for x in c.execute(select(change_log).where(change_log.c.field == "pdo_plan"))} == {date(2026, 9, 28)}
+    cat = {s["key"]: s for s in sources.catalog(engine, today=date(2026, 10, 12))}
+    assert cat["segments"]["status"] == "ok" or cat["segments"]["last"]   # отрезки загружены в seed
+    assert cat["pdo_plan"]["status"] == "пропуски" and "нет за декады" in cat["pdo_plan"]["detail"]
+    assert cat["load010"]["status"] == "нет" and cat["load010"]["required"]
+    assert client.get("/api/sources").status_code == 200 and client.get("/api/bitrix/watch").json()["webhook"] is False

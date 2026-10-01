@@ -5,7 +5,7 @@ import hmac
 import json
 import re
 import zipfile
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote, unquote
 
@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.engine import Engine
 
-from . import capacity, export, pdo, queries
+from . import bitrix_pdo, capacity, export, pdo, queries, sources
 from .config import Settings, get_settings
 from .bitrix import Bitrix, live_info
 from .db import bitrix_links, comments, make_engine, user_prefs
@@ -45,6 +45,10 @@ class BitrixLinkIn(BaseModel):
     task_id: str = Field(default="", max_length=20)
     deal_id: str = Field(default="", max_length=20)
     author: str = Field(default="", max_length=100)
+
+
+class WatchIn(BaseModel):
+    task: str = Field(min_length=1, max_length=300)    # номер задачи или ссылка на неё
 
 
 class SavedView(BaseModel):
@@ -282,26 +286,68 @@ def create_app(engine: Engine | None = None, settings: Settings | None = None) -
     def api_changes(days: int = 7, manager: str = ""):
         return queries.recent_changes(engine, days=max(1, min(days, 90)), manager=manager)
 
-    def _load_upload(data: bytes, filename: str, source: str) -> dict:
+    def _load_upload(data: bytes, filename: str, source: str, published_at: datetime | None = None) -> dict:
         """Разбор и запись — в пуле потоков: pandas на десятках мегабайт не должен держать остальные запросы."""
         try:
             source = source or sniff_source(data, filename) or ""
             if not source:
-                raise ValueError("Не похоже ни на одну из выгрузок: отрезки, светофор, план производства, диспетчерский")
+                raise ValueError("Не похоже ни на одну из выгрузок: отрезки, светофор, план производства, диспетчерский, "
+                                 "отчёты ПДО")
             with load_lock(engine, wait=False):
-                return load_file(engine, source, data, filename or source)
+                return load_file(engine, source, data, filename or source, published_at=published_at)
         except LoadBusy as e:
             raise HTTPException(409, str(e)) from e
         except (ValueError, KeyError, zipfile.BadZipFile, InvalidFileException) as e:
             raise HTTPException(400, f"Файл не разобран: {str(e)[:300]}") from e
 
     @app.post("/api/upload")
-    async def api_upload(request: Request, file: UploadFile = File(...), source: str = Form("")):
+    async def api_upload(request: Request, file: UploadFile = File(...), source: str = Form(""), modified: str = Form("")):
+        """modified — время изменения файла на компьютере (мс): у отчётов ПДО это дата публикации, чтобы загруженная
+        задним числом история не попадала в ленту изменений как сегодняшняя."""
         require_upload(request)
         if (file.size or 0) > MAX_UPLOAD_MB * 2**20:
             raise HTTPException(413, f"Файл больше {MAX_UPLOAD_MB} МБ")
+        published = None
+        if modified.isdigit():
+            try:
+                published = min(datetime.fromtimestamp(int(modified) / 1000), datetime.now())
+            except (OverflowError, OSError, ValueError):
+                published = None
         data = await file.read()
-        return await run_in_threadpool(_load_upload, data, file.filename or "", source)
+        return await run_in_threadpool(_load_upload, data, file.filename or "", source, published)
+
+    @app.get("/api/sources")
+    def api_sources():
+        """Что загружать в SalesVisor и в каком состоянии данные: последний файл, пропуски, глубина истории."""
+        return sources.catalog(engine)
+
+    @app.get("/api/bitrix/watch")
+    def api_watch():
+        """Задачи Битрикса, из вложений которых собираются отчёты ПДО, и сводка по их файлам."""
+        return bitrix_pdo.watch_list(engine, settings)
+
+    @app.post("/api/bitrix/watch")
+    def api_watch_add(request: Request, body: WatchIn):
+        require_upload(request)
+        try:
+            return bitrix_pdo.add_task(engine, settings, body.task, user_of(request))
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.delete("/api/bitrix/watch/{task_id}")
+    def api_watch_remove(request: Request, task_id: str):
+        require_upload(request)
+        if not bitrix_pdo.remove_task(engine, task_id):
+            raise HTTPException(404, "Такой задачи в списке нет")
+        return {"ok": True}
+
+    @app.post("/api/bitrix/collect")
+    def api_watch_collect(request: Request):
+        """Проверить задачи сейчас, не дожидаясь часовой синхронизации (идёт в фоне)."""
+        require_upload(request)
+        if not settings.bitrix_webhook_url:
+            raise HTTPException(400, "На сервере не задан вебхук Битрикса (BITRIX_WEBHOOK_URL)")
+        return {"started": bitrix_pdo.collect_background(engine, settings)}
 
     @app.post("/api/sync")
     def api_sync(request: Request):

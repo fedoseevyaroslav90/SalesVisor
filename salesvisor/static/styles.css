@@ -306,3 +306,10 @@ table.mini.sub td:nth-child(3) { min-width: 180px; }
 #capGroups td:nth-child(5) { white-space: normal; min-width: 200px; max-width: 280px; }
 #capGroups td .sub, #capPeredely td .sub { white-space: nowrap; }
 #capPeredely td:first-child { min-width: 170px; overflow-wrap: normal; }
+.watch-add { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0 10px; }
+.watch-add input { min-width: 320px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+#watchTable td:first-child, #srcTable td:first-child { min-width: 220px; white-space: normal; overflow-wrap: normal; }
+#srcTable td:nth-child(2), #srcTable td:nth-child(4) { white-space: normal; min-width: 200px; max-width: 340px; }
+#srcTable td:last-child { white-space: normal; min-width: 180px; max-width: 320px; }
+#srcTable td, #srcTable th, #watchTable td, #watchTable th { text-align: left; }
+#watchTable td.num, #watchTable th:nth-child(2), #watchTable th:nth-child(3), #watchTable th:nth-child(4) { text-align: right; }

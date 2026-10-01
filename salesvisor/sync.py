@@ -90,8 +90,9 @@ def run_sync(engine: Engine, settings: Settings, wait: bool = True) -> list[dict
             results = _from_metabase(engine, settings)
         else:
             results = import_folder(engine, settings.import_dir)
-    if settings.pdo_task_ids and settings.bitrix_webhook_url:
-        # отчёты ПДО и по материалам из вложений задачи «ВАЖНЫЕ НОВОСТИ У2» (решение РП 01.10.2026)
+    if settings.bitrix_webhook_url:
+        # отчёты ПДО и по материалам из вложений задач Битрикса (решение РП 01.10.2026); список задач — во вкладке
+        # «Загрузка», при первом запуске — PDO_TASK_IDS
         from .bitrix_pdo import collect
         try:
             results += collect(engine, settings)
