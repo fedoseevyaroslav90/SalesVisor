@@ -32,8 +32,10 @@ unset W
 sudo grep -q "^BITRIX_POST_COMMENTS=" $ENV || echo "BITRIX_POST_COMMENTS=0" | sudo tee -a $ENV >/dev/null
 echo "  перезапуск веба и синхронизации…"
 cd /opt/salesvisor/src
-sudo docker compose -p salesvisor --project-directory /opt/salesvisor/src -f docker-compose.yml \
-  -f deploy/docker-compose.ai-ag.yml up -d --force-recreate web sync </dev/null >/dev/null 2>&1
+if ! out=$(sudo docker compose -p salesvisor --project-directory /opt/salesvisor/src -f docker-compose.yml \
+    -f deploy/docker-compose.ai-ag.yml up -d --force-recreate web sync </dev/null 2>&1); then
+  echo "ОШИБКА: контейнеры не перезапустились (вебхук записан):"; echo "$out" | tail -5; exit 1
+fi
 sleep 8
 echo "  проверка доступа:"
 sudo docker exec -i salesvisor-web python -
