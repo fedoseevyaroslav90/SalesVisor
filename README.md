@@ -53,6 +53,7 @@ bash deploy/выкладка.sh            # код на ai-ag, копия ба�
 bash deploy/портал_окружение.sh    # один раз: общий секрет в окружение портала на ai-gw (без показа)
 bash deploy/nginx_загрузка.sh      # один раз: ручная загрузка выгрузок через портал до 160 МБ
 bash deploy/vykladka_put_zakaza.sh # «Путь заказа» целиком: .env (PDO_TASK_IDS), код, reload отрезков, история «Загрузки РЦ», синхронизация
+bash deploy/vebhuk_bitrix.sh        # вебхук Битрикс24 в .env сервера (скрытый ввод) и проверка доступа к задачам
 ```
 
 На сервере: `/opt/salesvisor/{src,.env,pgdata,backups}`, compose-проект `salesvisor` (`docker-compose.yml` + `deploy/docker-compose.ai-ag.yml`), откат — `sudo bash /opt/salesvisor/src/deploy/деплой_ai-ag.sh --rollback`. Карточка размещения — в папке «Внедрение ИИ»: `30_Контур и инфраструктура/33_Разборы и планы/SalesVisor — размещение сервиса «Контроль заказов» (30.09.2026).md`.
